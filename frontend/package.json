@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/core.test.mjs",
-    "test:browser": "node tests/core.browser.test.mjs"
+    "test:browser": "node tests/core.browser.test.mjs && node tests/logs.browser.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.0.1",

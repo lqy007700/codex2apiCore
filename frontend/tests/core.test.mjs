@@ -45,3 +45,18 @@ test('quota displays backend fields without inventing zero for unknown values',a
  assert.equal(stateInfo('usage_exhausted').label,'额度耗尽')
  assert.equal(stateInfo('unauthorized').label,'鉴权失败')
 })
+
+test('log queries always use server pagination, anchored dates and explicit diagnostic filters',async()=>{
+ const {defaultLogFilters,logTimeRange,logQuery,logValue,logStatus}=await import('../src/core/logView.ts')
+ const range=logTimeRange(defaultLogFilters,Date.parse('2026-10-14T12:00:00Z'))
+ assert.deepEqual(range,{start:'2026-10-13T12:00:00.000Z',end:'2026-10-14T12:00:00.000Z'})
+ const query=new URLSearchParams(logQuery({...defaultLogFilters,status:'error',q:' req & timeout ',account_id:'12',retry:'false',via_websocket:'true'},range,3,50))
+ assert.equal(query.get('page'),'3');assert.equal(query.get('page_size'),'50');assert.equal(query.get('start'),range.start)
+ assert.equal(query.get('q'),'req & timeout');assert.equal(query.get('error_only'),'true');assert.equal(query.get('include_canceled'),'true')
+ assert.equal(query.get('retry'),'false');assert.equal(query.get('account_id'),'12');assert.equal(query.get('status'),null)
+ assert.equal(new URLSearchParams(logQuery({...defaultLogFilters,status:'598'},range,1,20)).get('status'),'598')
+ for(const account_id of ['0','-1','1.5','NaN'])assert.throws(()=>logQuery({...defaultLogFilters,account_id},range,1,20),/正整数/)
+ assert.throws(()=>logTimeRange({...defaultLogFilters,range:'custom',start:'',end:''}),/有效的起止时间/)
+ assert.throws(()=>logTimeRange({...defaultLogFilters,range:'custom',start:'2026-10-14T12:00',end:'2026-10-13T12:00'}),/结束时间/)
+ assert.equal(logValue(null),'—');assert.equal(logValue(0,' ms'),'0 ms');assert.equal(logStatus(499).tone,'neutral');assert.equal(logStatus(598).tone,'bad')
+})

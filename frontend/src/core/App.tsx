@@ -1,11 +1,13 @@
 import {useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode} from 'react'
 import {NavLink, Navigate, Route, Routes, useNavigate} from 'react-router-dom'
-import {Activity, ArrowDownToLine, Check, ChevronLeft, ChevronRight, Fingerprint, KeyRound, LogOut, Plus, RefreshCw, Server, Settings, Shield, Users, X} from 'lucide-react'
+import {Activity, ArrowDownToLine, Check, ChevronLeft, ChevronRight, Fingerprint, KeyRound, LogOut, Plus, RefreshCw, Server, Settings, Shield, Users} from 'lucide-react'
 import {adminKey, formatTime, jsonObject, request, secretKey, send, writableSettings, type JsonRecord} from './client'
 import {accountFields, settingsGroups, type Field} from './settings'
 import {accountState, planLabel, stateInfo} from './accountView'
 import {AccountResources, QuotaWindow} from './AccountResources'
 import {ProxySelector, TimezoneSelector} from './AccountSelectors'
+import {Modal} from './Modal'
+import {RequestLogs} from './RequestLogs'
 import type {Account, AccountPage, KeyRow, ProxyRow} from './types'
 
 type Task = () => Promise<unknown>
@@ -44,27 +46,6 @@ function Header({title,description,children}:{title:string;description:string;ch
 function LoadingError({error,loading,refresh}:{error:string;loading:boolean;refresh:()=>unknown}) {
  return error?<div role="alert" className="notice error">{error}<button onClick={()=>void refresh()}>重试</button></div>:loading?<p className="muted" role="status">正在读取…</p>:null
 }
-function Modal({title,children,onClose}:{title:string;children:ReactNode;onClose:()=>void}) {
- const box=useRef<HTMLDivElement>(null), close=useRef(onClose)
- close.current=onClose
- useEffect(()=>{
-  const previous=document.activeElement as HTMLElement|null
-  const bodyOverflow=document.body.style.overflow;document.body.style.overflow='hidden'
-  box.current?.focus()
-  const key=(event:KeyboardEvent)=>{
-   if(event.key==='Escape')close.current()
-   if(event.key==='Tab'){
-    const elements=box.current?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href]')
-    if(!elements?.length)return
-    if(event.shiftKey && (document.activeElement===elements[0] || document.activeElement===box.current)){event.preventDefault();elements[elements.length-1].focus()}
-    else if(!event.shiftKey && document.activeElement===elements[elements.length-1]){event.preventDefault();elements[0].focus()}
-   }
-  }
-  document.addEventListener('keydown',key)
-  return()=>{document.body.style.overflow=bodyOverflow;document.removeEventListener('keydown',key);previous?.focus()}
- },[])
- return <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label={title} ref={box} tabIndex={-1}><div className="modal-heading"><h2>{title}</h2><button aria-label="关闭" onClick={onClose}><X size={18}/></button></div>{children}</div></div>
-}
 function Empty({children}:{children:ReactNode}) {return <div className="empty">{children}</div>}
 function Status({value}:{value:unknown}) {const info=stateInfo(value);return <span className={`badge ${info.tone}`} title={info.help}>{info.label}</span>}
 function FieldInput({field,value,onChange}:{field:Field;value:unknown;onChange:(value:unknown)=>void}) {
@@ -89,7 +70,7 @@ export default function App(){
  const [signedIn,setSignedIn]=useState(Boolean(adminKey()));const navigate=useNavigate()
  useEffect(()=>{const expired=()=>{sessionStorage.removeItem(secretKey);setSignedIn(false)};window.addEventListener('admin-auth-expired',expired);return()=>window.removeEventListener('admin-auth-expired',expired)},[])
  if(!signedIn)return <Login onLogin={()=>setSignedIn(true)}/>
- return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brand-icon"><Server size={22}/></div><div><strong>Codex 账号服务</strong><small>New API 的上游账号池</small></div></div><nav aria-label="管理导航">{navigation.map(({path,label,icon:Icon})=><NavLink key={path} to={path}><Icon size={18}/>{label}</NavLink>)}</nav><div className="sidebar-footer"><span className="badge good">Codex only</span><small>账号身份 · 连接执行 · 调度</small><button onClick={()=>{sessionStorage.removeItem(secretKey);setSignedIn(false);navigate('/accounts')}}><LogOut size={16}/>退出登录</button></div></aside><main className="content"><Routes><Route path="/accounts" element={<Accounts/>}/><Route path="/scheduler" element={<Scheduler/>}/><Route path="/proxies" element={<Proxies/>}/><Route path="/logs" element={<Logs/>}/><Route path="/keys" element={<Keys/>}/><Route path="/settings" element={<SettingsPage/>}/><Route path="*" element={<Navigate to="/accounts" replace/>}/></Routes></main></div>
+ return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brand-icon"><Server size={22}/></div><div><strong>Codex 账号服务</strong><small>New API 的上游账号池</small></div></div><nav aria-label="管理导航">{navigation.map(({path,label,icon:Icon})=><NavLink key={path} to={path}><Icon size={18}/>{label}</NavLink>)}</nav><div className="sidebar-footer"><span className="badge good">Codex only</span><small>账号身份 · 连接执行 · 调度</small><button onClick={()=>{sessionStorage.removeItem(secretKey);setSignedIn(false);navigate('/accounts')}}><LogOut size={16}/>退出登录</button></div></aside><main className="content"><Routes><Route path="/accounts" element={<Accounts/>}/><Route path="/scheduler" element={<Scheduler/>}/><Route path="/proxies" element={<Proxies/>}/><Route path="/logs" element={<RequestLogs/>}/><Route path="/keys" element={<Keys/>}/><Route path="/settings" element={<SettingsPage/>}/><Route path="*" element={<Navigate to="/accounts" replace/>}/></Routes></main></div>
 }
 function Accounts(){
  const [page,setPage]=useState(1),[search,setSearch]=useState(''),[query,setQuery]=useState(''),[selected,setSelected]=useState<number[]>([])
@@ -160,10 +141,6 @@ function Proxies(){
  const data=useData<{proxies:ProxyRow[]}>('/proxies'),[urls,setUrls]=useState(''),[label,setLabel]=useState('');const task=useTask()
  const add=(event:FormEvent)=>{event.preventDefault();void task.run(async()=>{await send('/proxies','POST',{urls:urls.split('\n').map(value=>value.trim()).filter(Boolean),label});setUrls('');await data.refresh()})}
  return <><Header title="代理出口" description="集中维护代理，账号可绑定独立出口；全局代理池开关在运行设置中。"><button onClick={()=>void data.refresh()} disabled={data.loading}><RefreshCw size={16}/>刷新</button></Header><Notice notice={task.notice}/><form className="card" onSubmit={add}><h2>添加代理</h2><div className="form-grid"><label className="field">代理 URL（每行一个）<textarea required rows={3} value={urls} onChange={event=>setUrls(event.target.value)} placeholder="http://… 或 socks5://…"/></label><label className="field">标签<input value={label} onChange={event=>setLabel(event.target.value)}/></label></div><button className="primary" disabled={task.busy}><Plus size={16}/>添加</button></form><LoadingError {...data}/><div className="table-card"><table><thead><tr><th>代理</th><th>状态</th><th>绑定数</th><th>操作</th></tr></thead><tbody>{data.value?.proxies.map(proxy=><tr key={proxy.id}><td><strong>{proxy.label||`代理 ${proxy.id}`}</strong><small>{proxy.url.replace(/\/\/[^/@]*@/,'//***@')}</small></td><td><Status value={proxy.enabled?(proxy.test_status??proxy.status??'untested'):'disabled'}/></td><td>{proxy.bound_count??0}</td><td><div className="actions"><button disabled={task.busy} onClick={()=>void task.run(async()=>{const result=await send('/proxies/test','POST',{id:proxy.id,url:proxy.url,lang:'zh'});await data.refresh();if(result.success===false||result.status==='error')throw new Error(String(result.error??result.message??'代理连接测试失败'))},'代理测试已结束')}>测试</button><button disabled={task.busy} onClick={()=>void task.run(async()=>{await send(`/proxies/${proxy.id}`,'PATCH',{enabled:!proxy.enabled});await data.refresh()})}>{proxy.enabled?'禁用':'启用'}</button><button disabled={task.busy} onClick={()=>{if(window.confirm('删除该代理？绑定账号的出口可能受影响。'))void task.run(async()=>{await send(`/proxies/${proxy.id}`,'DELETE');await data.refresh()})}}>删除</button></div></td></tr>)}</tbody></table>{data.value?.proxies.length===0&&<Empty>尚未添加代理。</Empty>}</div></>
-}
-function Logs(){
- const [limit,setLimit]=useState(100);const data=useData<{logs:JsonRecord[]}>(`/usage/logs?limit=${limit}`)
- return <><Header title="请求日志" description="查看账号执行、Token 用量、首字延迟与上游失败。终端用户计费由 New API 管理。"><select aria-label="日志条数" value={limit} onChange={event=>setLimit(Number(event.target.value))}>{[50,100,200,500].map(value=><option key={value} value={value}>最近 {value} 条</option>)}</select><button disabled={data.loading} onClick={()=>void data.refresh()}><RefreshCw size={16}/>刷新</button></Header><LoadingError {...data}/><div className="table-card"><table><thead><tr><th>时间 / 请求 ID</th><th>账号</th><th>模型</th><th>状态</th><th>首字 / 总耗时</th><th>输入 / 输出 Token</th><th>错误</th></tr></thead><tbody>{data.value?.logs.map((log,index)=><tr key={String(log.id??index)}><td>{formatTime(log.created_at)}<small>{String(log.request_id??'—')}</small></td><td>{String(log.account_name??log.account_id??'—')}</td><td>{String(log.model??'—')}</td><td><Status value={log.status_code}/></td><td>{String(log.first_token_ms??0)} / {String(log.duration_ms??0)} ms</td><td>{String(log.input_tokens??0)} / {String(log.output_tokens??0)}</td><td className="log-error">{String(log.error_message??'—')}</td></tr>)}</tbody></table>{data.value?.logs.length===0&&<Empty>尚无请求日志。</Empty>}</div></>
 }
 function Keys(){
  const data=useData<{keys:KeyRow[]}>('/keys?view=lite'),[name,setName]=useState('new-api'),[created,setCreated]=useState('');const task=useTask()

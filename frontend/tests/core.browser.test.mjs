@@ -46,7 +46,7 @@ try{
    if(proxiesFailed)return route.fulfill({status:502,contentType:'application/json',body:JSON.stringify({error:'测试代理列表加载失败'})})
    return json({proxies:[{id:1,url:'http://proxy.example:8080',label:'测试代理',enabled:true,test_status:'untested',bound_count:0},{id:2,url:'socks5://disabled.example:1080',label:'停用代理',enabled:false,test_status:'untested',bound_count:0}]})
   }
-  if(path==='/usage/logs')return json({logs:[]})
+  if(path==='/usage/logs')return json({logs:[],total:0})
   if(path==='/keys')return json({keys:[]})
   failures.push(`unexpected ${method} ${path}`);return route.fulfill({status:404,body:'{}'})
  })
