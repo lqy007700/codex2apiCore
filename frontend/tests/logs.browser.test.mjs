@@ -14,10 +14,17 @@ try{
  page.on('pageerror',error=>failures.push(error.message))
  const longError='上游请求失败：rate_limit_exceeded\n'+Array.from({length:60},(_,i)=>`诊断行 ${i}: ${'long-diagnostic-fragment-'.repeat(10)}`).join('\n')+'\nERROR_END <script>window.injected=true</script>'
  const records=Array.from({length:45},(_,index)=>({id:index+1,request_id:`req-${String(index+1).padStart(3,'0')}`,upstream_request_id:`upstream-${index+1}`,account_id:index%2+1,account_name:index%2?'备用账号':'主账号',model:'gpt-5.1-codex',status_code:index%3===0?598:index%3===1?200:499,error_message:index%3===0?longError:'',upstream_error_kind:index%3===0?'rate_limit_exceeded':'',created_at:'2026-10-14T08:01:00Z',first_token_ms:index%3===1?null:1200,duration_ms:5200,input_tokens:2200,output_tokens:index%3===1?null:120,cached_tokens:900,stream:true,via_websocket:true,is_retry_attempt:index%3===0,attempt_index:index%3===0?2:1}))
- let failNext=false
+ let failNext=false,chainFail=false
+ const chainRecords=[{...records[0],attempt_index:1,status_code:429,upstream_request_id:'upstream-first'},{...records[0],id:100,attempt_index:2,status_code:503,upstream_request_id:'upstream-second'},{...records[0],id:101,account_id:2,account_name:'备用账号',attempt_index:3,status_code:200,is_retry_attempt:false,error_message:'',upstream_error_kind:'',upstream_request_id:'upstream-final'}]
+ let chainData={request_id:'req-001',linked:true,log_mode:'full',total:3,truncated:false,records:chainRecords}
  await page.route('**/api/admin/**',async route=>{
   const url=new URL(route.request().url()),path=url.pathname.replace('/api/admin','')
   const json=value=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(value)})
+  if(path==='/usage/logs/1/chain'){
+   assert.equal(url.searchParams.size,0,'chain must not inherit list filters')
+   if(chainFail){chainFail=false;return route.fulfill({status:503,contentType:'application/json',body:'{"error":"链路查询失败"}'})}
+   return json(chainData)
+  }
   if(path==='/usage/logs'){
    const q=url.searchParams;queries.push(q)
    assert(q.has('start')&&q.has('end'));assert.equal(q.get('include_canceled'),'true');assert.equal(q.has('limit'),false)
@@ -39,6 +46,33 @@ try{
  await page.getByText('共 45 条匹配记录',{exact:true}).waitFor()
  assert.equal(await page.locator('tbody tr').count(),20)
  assert.equal(await page.getByText('ERROR_END',{exact:false}).count(),0,'full error must stay unmounted until preview opens')
+ await page.getByRole('button',{name:'请求链路 req-001',exact:true}).click()
+ const chain=page.getByRole('dialog',{name:'请求链路',exact:true})
+ await chain.getByText('第 3 次尝试',{exact:true}).waitFor()
+ assert.equal(await chain.locator('.chain-node').count(),3)
+ await chain.getByRole('button',{name:'查看错误详情 req-001',exact:true}).first().hover();await page.getByRole('dialog',{name:'错误详情',exact:true}).waitFor()
+ await page.keyboard.press('Escape');await page.getByRole('dialog',{name:'错误详情',exact:true}).waitFor({state:'hidden'});assert.equal(await chain.isVisible(),true,'Esc on nested preview must keep chain open')
+ assert.equal(await chain.locator('.chain-summary>div').nth(0).locator('strong').textContent(),'3')
+ assert.equal(await chain.locator('.chain-summary>div').nth(1).locator('strong').textContent(),'2')
+ assert.equal(await chain.locator('.chain-summary>div').nth(2).locator('strong').textContent(),'1')
+ await chain.getByText('同账号重试',{exact:true}).waitFor();await chain.getByText('换号重试',{exact:true}).waitFor()
+ await chain.locator('.chain-node').last().getByText('查看本次执行字段',{exact:true}).click();await chain.getByText('upstream-final',{exact:true}).waitFor()
+ await chain.getByRole('button',{name:'复制链路请求 ID',exact:true}).click();assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'req-001')
+ await chain.evaluate(element=>element.scrollTop=0);await delay(200);await page.screenshot({path:'/tmp/codex2api-request-chain.png'})
+ await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'mobile chain overflow')
+ await chain.evaluate(element=>element.scrollTop=0);await delay(200);await page.screenshot({path:'/tmp/codex2api-request-chain-mobile.png'});await page.setViewportSize({width:1440,height:1000})
+ chainData={...chainData,records:[chainRecords[0]],total:1}
+ await chain.getByRole('button',{name:'刷新链路',exact:true}).click();await chain.getByText('尚无后续尝试记录，不能确认计划的重试已经执行。',{exact:true}).waitFor()
+ assert.equal(await chain.locator('.chain-summary>div').nth(1).locator('strong').textContent(),'0')
+ chainData={...chainData,log_mode:'errors',records:[chainRecords[0],chainRecords[2]],total:2}
+ await chain.getByRole('button',{name:'刷新链路',exact:true}).click();await chain.getByText(/当前日志模式为仅错误/).waitFor();await chain.getByText(/尝试序号存在缺失/).waitFor()
+ chainData={...chainData,request_id:'',linked:false,records:[{...chainRecords[0],attempt_index:0,request_id:''}],total:1}
+ await chain.getByRole('button',{name:'刷新链路',exact:true}).click();await chain.getByText(/此记录没有请求关联 ID/).waitFor()
+ assert.equal(await chain.getByRole('button',{name:'复制链路请求 ID',exact:true}).isDisabled(),true)
+ chainFail=true;await chain.getByRole('button',{name:'刷新链路',exact:true}).click();await chain.getByRole('alert').filter({hasText:'链路查询失败'}).waitFor()
+ chainData={...chainData,request_id:'req-001',linked:true,log_mode:'full',records:chainRecords,total:3}
+ await chain.getByRole('button',{name:'重试',exact:true}).click();await chain.getByText('第 3 次尝试',{exact:true}).waitFor()
+ await page.keyboard.press('Escape');await chain.waitFor({state:'hidden'})
  const preview=page.getByRole('button',{name:'查看错误详情 req-001',exact:true})
  await preview.hover()
  const popover=page.getByRole('dialog',{name:'错误详情',exact:true})
@@ -95,5 +129,5 @@ try{
  await delay(500);await page.screenshot({path:'/tmp/codex2api-request-logs-mobile.png'})
  await page.getByRole('button',{name:'关闭错误详情',exact:true}).click();await popover.waitFor({state:'hidden'})
  assert.deepEqual(failures,[])
- console.log('Request log filters, pagination, full error hover/click, copy, details and mobile checks passed')
+ console.log('Request log filters, pagination, request chain actual attempts/account changes, missing history, copy, hover/click and mobile checks passed')
 }finally{await browser?.close();server.kill('SIGTERM')}

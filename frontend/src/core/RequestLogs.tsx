@@ -1,64 +1,19 @@
-import {useEffect, useId, useLayoutEffect, useRef, useState} from 'react'
-import {createPortal} from 'react-dom'
-import {ChevronLeft, ChevronRight, Copy, RefreshCw, Search, X} from 'lucide-react'
-import {formatTime, request, type JsonRecord} from './client'
-import {Modal} from './Modal'
-import {defaultLogFilters, logQuery, logStatus, logTimeRange, logValue, type LogFilters} from './logView'
+import {useEffect, useState} from 'react'
+import {ChevronLeft, ChevronRight, RefreshCw, Search} from 'lucide-react'
+import {formatTime, request} from './client'
+import {ErrorPreview, LogDetails} from './LogEntry'
+import {RequestChain} from './RequestChain'
+import {defaultLogFilters, logQuery, logStatus, logTimeRange, logValue, type LogFilters, type UsageLog} from './logView'
 
-type Log = JsonRecord & {id:number;request_id?:string;error_message?:string;upstream_error_kind?:string}
-type LogPage = {logs:Log[];total:number}
-const errorText=(log:Log)=>log.error_message?.trim()||log.upstream_error_kind||String(log.internal_reason||'未记录错误正文')
-
-function ErrorPreview({log,onDetail}:{log:Log;onDetail:()=>void}) {
- const [open,setOpen]=useState(false),[pinned,setPinned]=useState(false),[copied,setCopied]=useState('')
- const trigger=useRef<HTMLButtonElement>(null),panel=useRef<HTMLDivElement>(null),timer=useRef<ReturnType<typeof setTimeout>|null>(null),skipFocus=useRef(false)
- const [position,setPosition]=useState({left:12,top:12}),id=useId()
- const cancel=()=>{if(timer.current!==null)clearTimeout(timer.current);timer.current=null}
- const close=()=>{cancel();setOpen(false);setPinned(false);setCopied('')}
- const leave=()=>{cancel();if(!pinned)timer.current=setTimeout(()=>setOpen(false),180)}
- useEffect(()=>()=>{if(timer.current!==null)clearTimeout(timer.current)},[])
- useLayoutEffect(()=>{
-  if(!open)return
-  const anchor=trigger.current?.getBoundingClientRect(),box=panel.current?.getBoundingClientRect()
-  if(!anchor||!box)return
-  const below=anchor.bottom+8
-  setPosition({left:Math.max(12,Math.min(anchor.right-box.width,innerWidth-box.width-12)),top:Math.max(12,Math.min(below+box.height<=innerHeight-12?below:anchor.top-box.height-8,innerHeight-box.height-12))})
- },[open])
- useEffect(()=>{
-  if(!open)return
-  const outside=(event:PointerEvent)=>{if(!panel.current?.contains(event.target as Node)&&!trigger.current?.contains(event.target as Node))close()}
-  const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.stopPropagation();close();skipFocus.current=true;trigger.current?.focus();skipFocus.current=false}}
-  const scroll=(event:Event)=>{if(!panel.current?.contains(event.target as Node))close()}
-  document.addEventListener('pointerdown',outside);document.addEventListener('keydown',key)
-  window.addEventListener('resize',close);document.addEventListener('scroll',scroll,true)
-  return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',key);window.removeEventListener('resize',close);document.removeEventListener('scroll',scroll,true)}
- },[open])
- const text=errorText(log),hasError=Boolean(log.error_message||log.upstream_error_kind||log.internal_reason)
- if(!hasError)return <span className="muted">—</span>
- return <><button ref={trigger} className="log-error-trigger" aria-label={`查看错误详情 ${log.request_id||log.id}`} aria-expanded={open} aria-controls={open?id:undefined}
- onPointerEnter={event=>{if(event.pointerType==='mouse'){cancel();setOpen(true)}}} onPointerLeave={leave}
- onFocus={()=>{if(!skipFocus.current){cancel();setOpen(true)}}} onBlur={event=>{if(!panel.current?.contains(event.relatedTarget))leave()}}
- onClick={()=>{cancel();setOpen(true);setPinned(true)}}><span>{text.replace(/\s+/g,' ').slice(0,100)}</span></button>
- {open&&createPortal(<div ref={panel} id={id} className="log-popover" role="dialog" aria-label="错误详情" style={position}
- onPointerEnter={cancel} onPointerLeave={leave} onFocus={cancel} onBlur={event=>{if(!panel.current?.contains(event.relatedTarget)&&event.relatedTarget!==trigger.current)leave()}}>
- <div className="log-popover-heading"><strong>{log.upstream_error_kind||'错误详情'}</strong><button aria-label="关闭错误详情" onClick={close}><X size={15}/></button></div>
- <pre>{text}</pre><div className="log-popover-actions"><button onClick={async()=>{try{await navigator.clipboard.writeText(text);setCopied('已复制错误')}catch{setCopied('复制失败，请选中正文复制')}}}><Copy size={14}/>复制错误</button><button onClick={()=>{close();onDetail()}}>完整请求详情</button></div><small role="status">{copied||'悬停查看 · 点击固定 · Esc 关闭'}</small>
- </div>,document.body)}</>
-}
-function LogDetails({log,onClose}:{log:Log;onClose:()=>void}) {
- const [notice,setNotice]=useState('')
- const fields:[string,unknown][]=[['记录时间',formatTime(log.created_at)],['请求 ID',log.request_id],['上游请求 ID',log.upstream_request_id],['父请求 ID',log.parent_request_id],['账号',`${logValue(log.account_name)} · #${logValue(log.account_id)}`],['渠道密钥',`${logValue(log.api_key_name)} · #${logValue(log.api_key_id)}`],['请求模型',log.model],['实际发送模型',log.effective_model],['上游返回模型',log.upstream_response_model],['请求入口',log.inbound_endpoint||log.endpoint],['上游入口',log.upstream_endpoint],['客户端 IP',log.client_ip],['首字延迟',logValue(log.first_token_ms,' ms')],['总耗时',logValue(log.duration_ms,' ms')],['输入 / 输出 Token',`${logValue(log.input_tokens??log.prompt_tokens)} / ${logValue(log.output_tokens??log.completion_tokens)}`],['缓存 / 推理 Token',`${logValue(log.cached_tokens)} / ${logValue(log.reasoning_tokens)}`],['流式响应',log.stream===undefined?'—':log.stream?'是':'否'],['上游传输',log.via_websocket===undefined?'—':log.via_websocket?'WebSocket':'HTTP'],['重试记录',log.is_retry_attempt===undefined?'—':log.is_retry_attempt?'是':'否'],['尝试序号',log.attempt_index],['内部原因',log.internal_reason],['客户端 User-Agent',log.client_user_agent],['上游 User-Agent',log.upstream_user_agent]]
- const status=logStatus(log.status_code)
- return <Modal title="请求详情" onClose={onClose}><div className="log-detail-heading"><span className={`badge ${status.tone}`} title={status.help}>{status.label}</span><button disabled={!log.request_id} onClick={async()=>{try{await navigator.clipboard.writeText(log.request_id!);setNotice('已复制请求 ID')}catch{setNotice('复制失败，请选中请求 ID 复制')}}}><Copy size={14}/>复制请求 ID</button></div>{notice&&<p role="status">{notice}</p>}<dl className="facts">{fields.map(([label,value])=><div key={label}><dt>{label}</dt><dd>{logValue(value)}</dd></div>)}</dl><h2>错误正文</h2><pre>{errorText(log)}</pre><details><summary>原始日志字段</summary><pre>{JSON.stringify(log,null,2)}</pre></details></Modal>
-}
+type LogPage = {logs:UsageLog[];total:number}
 
 export function RequestLogs() {
  const [draft,setDraft]=useState<LogFilters>({...defaultLogFilters})
  const [query,setQuery]=useState(()=>({filters:{...defaultLogFilters},range:logTimeRange(defaultLogFilters),page:1,pageSize:20,revision:0}))
- const [data,setData]=useState<LogPage|null>(null),[loading,setLoading]=useState(true),[error,setError]=useState(''),[validation,setValidation]=useState(''),[detail,setDetail]=useState<Log|null>(null)
+ const [data,setData]=useState<LogPage|null>(null),[loading,setLoading]=useState(true),[error,setError]=useState(''),[validation,setValidation]=useState(''),[detail,setDetail]=useState<UsageLog|null>(null),[chain,setChain]=useState<number|null>(null)
  const path=`/usage/logs?${logQuery(query.filters,query.range,query.page,query.pageSize)}`
  useEffect(()=>{
-  const controller=new AbortController();setLoading(true);setData(null);setError('');setDetail(null)
+  const controller=new AbortController();setLoading(true);setData(null);setError('');setDetail(null);setChain(null)
   void request<LogPage>(path,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(30000)])}).then(result=>{if(!controller.signal.aborted){const last=Math.max(1,Math.ceil(result.total/query.pageSize));if(query.page>last)setQuery(previous=>({...previous,page:last}));else setData(result)}}).catch(error=>{if(!controller.signal.aborted)setError(error instanceof Error?error.message:String(error))}).finally(()=>{if(!controller.signal.aborted)setLoading(false)})
   return()=>controller.abort()
  },[path,query.revision])
@@ -80,7 +35,7 @@ export function RequestLogs() {
  <details className="log-advanced"><summary>更多筛选 · 账号 / 模型 / 渠道 / 传输</summary><div className="log-filter-grid">
  {input('account_id','账号 ID','例如 12',true)}{input('model','模型（精确匹配）','例如 gpt-5.1-codex')}{input('api_key_id','渠道密钥 ID','例如 3',true)}{input('error_kind','错误类型（精确匹配）','例如 rate_limit_exceeded')}
  {select('endpoint','请求入口',[['','全部入口'],['/v1/responses','/v1/responses'],['/v1/chat/completions','/v1/chat/completions'],['/v1/messages','/v1/messages']])}
- {select('stream','响应方式',[['','全部响应'],['true','流式'],['false','非流式']])}{select('via_websocket','上游传输',[['','全部传输'],['true','WebSocket'],['false','HTTP']])}{select('retry','重试记录',[['','全部记录'],['true','仅重试'],['false','排除重试']])}
+ {select('stream','响应方式',[['','全部响应'],['true','流式'],['false','非流式']])}{select('via_websocket','上游传输',[['','全部传输'],['true','WebSocket'],['false','HTTP']])}{select('retry','失败后计划重试',[['','全部记录'],['true','有重试计划'],['false','无重试计划']])}
  </div></details>
  {validation&&<p role="alert" className="error-text">{validation}</p>}
  <div className="log-filter-actions"><div className="actions"><button className="primary"><Search size={16}/>查询</button><button type="button" onClick={()=>apply({...defaultLogFilters})}>重置筛选</button><button type="button" className={query.filters.status==='error'?'log-quick-active':''} onClick={()=>apply({...draft,status:query.filters.status==='error'?'all':'error'})}>仅看错误</button></div><small className="muted">条件填写后点击查询 · 从数据库筛选全部匹配记录</small></div>
@@ -89,8 +44,9 @@ export function RequestLogs() {
  {error&&<div role="alert" className="notice error">{error}<button onClick={refresh}>重试</button></div>}
  <div className="table-card log-table" aria-busy={loading}><table><thead><tr><th>时间 / 请求 ID</th><th>账号 / 模型</th><th>状态</th><th>首字 / 总耗时</th><th>输入 / 输出 Token</th><th>错误摘要</th><th>操作</th></tr></thead><tbody>{logs.map(log=>{
  const status=logStatus(log.status_code)
- return <tr key={log.id}><td className="log-time">{formatTime(log.created_at)}<button className="log-id" onClick={()=>setDetail(log)}>{String(log.request_id||'未记录请求 ID')}</button></td><td className="log-account"><strong>{String(log.account_name||`账号 #${logValue(log.account_id)}`)}</strong><small>{logValue(log.model)}</small><div className="log-tags">{log.via_websocket===true&&<span>WS</span>}{log.stream===true&&<span>流式</span>}{log.is_retry_attempt===true&&<span>重试 #{logValue(log.attempt_index)}</span>}</div></td><td><span className={`badge ${status.tone}`} title={status.help}>{status.label}</span></td><td className="log-numbers">{logValue(log.first_token_ms)} / {logValue(log.duration_ms)}<small>ms</small></td><td className="log-numbers">{logValue(log.input_tokens??log.prompt_tokens)} / {logValue(log.output_tokens??log.completion_tokens)}<small>缓存 {logValue(log.cached_tokens)}</small></td><td className="log-error-cell"><ErrorPreview log={log} onDetail={()=>setDetail(log)}/></td><td><button className="log-detail-button" aria-label={`请求详情 ${log.request_id||log.id}`} onClick={()=>setDetail(log)}>详情</button></td></tr>
+ return <tr key={log.id}><td className="log-time">{formatTime(log.created_at)}<button className="log-id" onClick={()=>setChain(log.id)}>{String(log.request_id||'未记录请求 ID')}</button></td><td className="log-account"><strong>{String(log.account_name||`账号 #${logValue(log.account_id)}`)}</strong><small>{logValue(log.model)}</small><div className="log-tags">{log.via_websocket===true&&<span>WS</span>}{log.stream===true&&<span>流式</span>}{Number(log.attempt_index)>1&&<span>第 {logValue(log.attempt_index)} 次尝试</span>}{log.is_retry_attempt===true&&<span>计划重试</span>}</div></td><td><span className={`badge ${status.tone}`} title={status.help}>{status.label}</span></td><td className="log-numbers">{logValue(log.first_token_ms)} / {logValue(log.duration_ms)}<small>ms</small></td><td className="log-numbers">{logValue(log.input_tokens??log.prompt_tokens)} / {logValue(log.output_tokens??log.completion_tokens)}<small>缓存 {logValue(log.cached_tokens)}</small></td><td className="log-error-cell"><ErrorPreview log={log} onDetail={()=>setDetail(log)}/></td><td><div className="actions"><button className="log-detail-button" aria-label={`请求链路 ${log.request_id||log.id}`} onClick={()=>setChain(log.id)}>链路</button><button className="log-detail-button" aria-label={`请求详情 ${log.request_id||log.id}`} onClick={()=>setDetail(log)}>详情</button></div></td></tr>
  })}</tbody></table>{loading?<div className="empty" role="status">正在查询…</div>:!error&&!logs.length?<div className="empty">此时间范围内没有匹配日志，请调整筛选条件或时间范围。</div>:null}</div>
  <div className="pagination log-pagination"><span>{data?`第 ${query.page} / ${pages} 页 · 本页 ${logs.length} 条`:'—'}</span><button disabled={loading||!data||query.page<=1} onClick={()=>setQuery(previous=>({...previous,page:previous.page-1}))}><ChevronLeft size={16}/>上一页</button><button disabled={loading||!data||query.page>=pages} onClick={()=>setQuery(previous=>({...previous,page:previous.page+1}))}>下一页<ChevronRight size={16}/></button></div>
- {detail&&<LogDetails log={detail} onClose={()=>setDetail(null)}/>}</>
+ {chain!==null&&<RequestChain logID={chain} onClose={()=>setChain(null)}/>}
+ {detail&&<LogDetails log={detail} onClose={()=>setDetail(null)} onChain={()=>{setChain(detail.id);setDetail(null)}}/>}</>
 }

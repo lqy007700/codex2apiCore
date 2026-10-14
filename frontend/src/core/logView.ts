@@ -1,3 +1,4 @@
+export type UsageLog = Record<string,unknown> & {id:number;request_id?:string;error_message?:string;upstream_error_kind?:string}
 export type LogFilters = {
  range:string; start:string; end:string; q:string; status:string; model:string;
  account_id:string; api_key_id:string; endpoint:string; stream:string; retry:string; via_websocket:string; error_kind:string
@@ -33,4 +34,24 @@ export function logStatus(value:unknown) {
 }
 export function logValue(value:unknown, suffix='') {
  return value===null||value===undefined||value===''?'—':`${String(value)}${suffix}`
+}
+
+const attemptNumber=(row:UsageLog)=>Number.isSafeInteger(row.attempt_index)&&Number(row.attempt_index)>0?Number(row.attempt_index):0
+export function summarizeChain(records:UsageLog[]) {
+ const groups=new Map<number,UsageLog[]>()
+ for(const row of records){const index=attemptNumber(row);if(index)groups.set(index,[...(groups.get(index)??[]),row])}
+ const indices=[...groups.keys()].sort((a,b)=>a-b)
+ let switches=0
+ for(let i=1;i<indices.length;i++){
+  const previous=groups.get(indices[i-1])!,current=groups.get(indices[i])!
+  if(indices[i]===indices[i-1]+1&&previous.length===1&&current.length===1&&Number(previous[0].account_id)>0&&Number(current[0].account_id)>0&&previous[0].account_id!==current[0].account_id)switches++
+ }
+ return {attempts:indices.length,retries:indices.filter(index=>index>1).length,switches,highest:indices[indices.length-1]??0,gaps:(indices[indices.length-1]??0)!==indices.length,ambiguous:[...groups.values()].some(rows=>rows.length>1),unindexed:records.filter(row=>!attemptNumber(row)).length}
+}
+export function chainTransition(previous:UsageLog,current:UsageLog) {
+ const before=attemptNumber(previous),after=attemptNumber(current)
+ if(!before||!after||after<=before)return '下一条执行记录'
+ if(after!==before+1)return '后续尝试 · 中间记录缺失'
+ if(Number(previous.account_id)<=0||Number(current.account_id)<=0)return '继续重试 · 账号未知'
+ return previous.account_id===current.account_id?'同账号重试':'换号重试'
 }

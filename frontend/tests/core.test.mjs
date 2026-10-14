@@ -60,3 +60,21 @@ test('log queries always use server pagination, anchored dates and explicit diag
  assert.throws(()=>logTimeRange({...defaultLogFilters,range:'custom',start:'2026-10-14T12:00',end:'2026-10-13T12:00'}),/结束时间/)
  assert.equal(logValue(null),'—');assert.equal(logValue(0,' ms'),'0 ms');assert.equal(logStatus(499).tone,'neutral');assert.equal(logStatus(598).tone,'bad')
 })
+
+test('request chain counts actual recorded attempts, not planned retries or internal rounds',async()=>{
+ const {summarizeChain,chainTransition}=await import('../src/core/logView.ts')
+ const initial={id:1,account_id:10,attempt_index:1,is_retry_attempt:true,status_code:429}
+ assert.deepEqual(summarizeChain([initial]),{attempts:1,retries:0,switches:0,highest:1,gaps:false,ambiguous:false,unindexed:0})
+ const sameAccount={id:2,account_id:10,attempt_index:2,is_retry_attempt:true,status_code:503},switched={id:3,account_id:20,attempt_index:3,status_code:200}
+ assert.deepEqual(summarizeChain([initial,sameAccount,switched]),{attempts:3,retries:2,switches:1,highest:3,gaps:false,ambiguous:false,unindexed:0})
+ assert.equal(chainTransition(initial,sameAccount),'同账号重试');assert.equal(chainTransition(sameAccount,switched),'换号重试')
+ const gap={id:4,account_id:30,attempt_index:5}
+ assert.equal(summarizeChain([initial,gap]).gaps,true);assert.equal(summarizeChain([initial,gap]).switches,0)
+ assert.equal(chainTransition(initial,gap),'后续尝试 · 中间记录缺失')
+ const internal={id:5,account_id:20,attempt_index:0}
+ assert.equal(summarizeChain([initial,internal]).unindexed,1);assert.equal(summarizeChain([initial,internal]).retries,0)
+ assert.equal(summarizeChain([internal]).attempts,0)
+ const duplicate={...sameAccount,id:6,account_id:99}
+ assert.equal(summarizeChain([initial,sameAccount,duplicate,switched]).ambiguous,true)
+ assert.equal(summarizeChain([initial,sameAccount,duplicate,switched]).switches,0)
+})

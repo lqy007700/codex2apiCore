@@ -40,6 +40,9 @@ func TestPostgresTraceAndCapabilities(t *testing.T) {
 	if len(logs) != 1 || logs[0].UpstreamRequestID != "pg-upstream" || logs[0].UpstreamProxyID != 9 || logs[0].UpstreamProxyName != "snapshot" {
 		t.Fatalf("PostgreSQL trace did not round-trip: %+v", logs)
 	}
+	if chain, err := db.GetUsageRequestChain(ctx, logs[0].ID); err != nil || chain.RequestID != "pg-request" || len(chain.Records) != 1 {
+		t.Fatalf("PostgreSQL request chain: %+v, %v", chain, err)
+	}
 	if _, err := db.ListUsageLogsByTimeRangePaged(ctx, f); err != nil {
 		t.Fatal(err)
 	}
