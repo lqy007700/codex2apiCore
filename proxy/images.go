@@ -13,7 +13,7 @@ import (
 	_ "image/png"
 	"io"
 	"log"
-	"mime/multipart"
+
 	"net/http"
 	"os"
 	"strconv"
@@ -395,15 +395,6 @@ func imageUsageLogInfoFromImages(images []imageCallResult) imageUsageLogInfo {
 	return info
 }
 
-func AppendImageStyleToPrompt(prompt string, style string) string {
-	prompt = strings.TrimSpace(prompt)
-	style = strings.TrimSpace(style)
-	if style == "" {
-		return prompt
-	}
-	return prompt + "\n\nStyle guidance: " + style
-}
-
 func imageUsageLogInfoFromResponseJSON(responseJSON []byte) imageUsageLogInfo {
 	var info imageUsageLogInfo
 	output := gjson.GetBytes(responseJSON, "output")
@@ -445,9 +436,6 @@ func isImageOnlyModel(model string) bool {
 
 // IsGPTImageModel 判断模型名是否属于 Codex 生图模型族(gpt-image-*),含 -2k/-4k
 // 档位别名与带日期的快照名。供 admin 生图台等外部包复用同一准入判定。
-func IsGPTImageModel(model string) bool {
-	return isImageOnlyModel(model)
-}
 
 // splitImageModelSizeAlias 把 gpt-image-*-2k / -4k 拆成基础模型与档位后缀;
 // 无后缀时返回原模型与空串。
@@ -573,15 +561,6 @@ func inferImageAspectFromPrompt(prompt string) string {
 		return "landscape"
 	}
 	return ""
-}
-
-func setDefaultImageToolSize(tool []byte, defaultSize string) []byte {
-	defaultSize = strings.TrimSpace(defaultSize)
-	if defaultSize == "" || strings.TrimSpace(gjson.GetBytes(tool, "size").String()) != "" {
-		return tool
-	}
-	tool, _ = sjson.SetBytes(tool, "size", defaultSize)
-	return tool
 }
 
 func shouldValidateGPTImage2Size(model string) bool {
@@ -1066,16 +1045,6 @@ func stripResponsesInputImageTools(body []byte) []byte {
 	return updated
 }
 
-func validateImagesModel(model string) error {
-	if isGrokVideoModel(model) {
-		return fmt.Errorf("model %q is a video model, use /v1/videos/generations instead", strings.TrimSpace(model))
-	}
-	if !isImageOnlyModel(model) && !isGrokImageModel(model) {
-		return fmt.Errorf("images endpoint requires an image model, got %q", strings.TrimSpace(model))
-	}
-	return nil
-}
-
 // mediaOnlyModelEndpoints 返回媒体专用模型对应的下游端点提示文案。
 func mediaOnlyModelEndpoints(model string) string {
 	if isGrokVideoModel(model) {
@@ -1113,453 +1082,14 @@ func mimeTypeFromOutputFormat(outputFormat string) string {
 	}
 }
 
-func parseIntField(raw string, fallback int64) int64 {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return fallback
-	}
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return fallback
-	}
-	return value
-}
-
-func parseBoolField(raw string, fallback bool) bool {
-	raw = strings.TrimSpace(strings.ToLower(raw))
-	if raw == "" {
-		return fallback
-	}
-	switch raw {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return fallback
-	}
-}
-
-func multipartFileToDataURL(fileHeader *multipart.FileHeader) (string, error) {
-	if fileHeader == nil {
-		return "", fmt.Errorf("upload file is nil")
-	}
-	const maxImageUploadBytes = 20 * 1024 * 1024
-	if fileHeader.Size > maxImageUploadBytes {
-		return "", fmt.Errorf("upload file too large (%d bytes, max %d)", fileHeader.Size, maxImageUploadBytes)
-	}
-	if fileHeader.Size == 0 {
-		return "", fmt.Errorf("upload file is empty")
-	}
-	file, err := fileHeader.Open()
-	if err != nil {
-		return "", fmt.Errorf("open upload file failed: %w", err)
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return "", fmt.Errorf("read upload file failed: %w", err)
-	}
-	if len(data) == 0 {
-		return "", fmt.Errorf("upload %q is empty", strings.TrimSpace(fileHeader.Filename))
-	}
-
-	mediaType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
-	if mediaType == "" {
-		mediaType = http.DetectContentType(data)
-	}
-	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
-}
-
-func (h *Handler) ImagesGenerations(c *gin.Context) {
-	releaseImage, admitted := admitDirectImageExecution(c)
-	if !admitted {
-		return
-	}
-	defer releaseImage()
-	rawBody, err := readRawRequestBody(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-		return
-	}
-	h.capturePromptRequestIngress(c, rawBody)
-	if !json.Valid(rawBody) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: body must be valid JSON", "type": "invalid_request_error"}})
-		return
-	}
-
-	prompt := strings.TrimSpace(gjson.GetBytes(rawBody, "prompt").String())
-	if prompt == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: prompt is required", "type": "invalid_request_error"}})
-		return
-	}
-
-	imageModel := strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
-	modelProvided := imageModel != ""
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
-	requestModel := imageModel
-	if modelProvided {
-		if mappedModel, ok := h.resolveConfiguredRequestModel(imageModel, h.supportedModelIDs(c.Request.Context())); ok {
-			imageModel = mappedModel
-		}
-	}
-	logEffectiveModel := usageEffectiveModelForMapping(requestModel, imageModel, !strings.EqualFold(requestModel, imageModel))
-	if err := validateImagesModel(imageModel); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-		return
-	}
-
-	responseFormat := strings.TrimSpace(gjson.GetBytes(rawBody, "response_format").String())
-	if responseFormat == "" {
-		responseFormat = "b64_json"
-	}
-	stream := gjson.GetBytes(rawBody, "stream").Bool()
-
-	style := strings.TrimSpace(gjson.GetBytes(rawBody, "style").String())
-	promptForRequest := AppendImageStyleToPrompt(prompt, style)
-	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/images/generations", imageModel) {
-		return
-	}
-	if h.enforceAPIKeyLimitsAndReply(c, imageModel) {
-		return
-	}
-	releaseAPIKeyConcurrency, ok := h.acquireAPIKeyConcurrency(c)
-	if !ok {
-		return
-	}
-	if releaseAPIKeyConcurrency != nil {
-		defer releaseAPIKeyConcurrency()
-	}
-	if isGrokImageModel(imageModel) {
-		h.forwardGrokImagesRequest(c, "/v1/images/generations", imageModel, requestModel, logEffectiveModel, promptForRequest, responseFormat, grokImagesParamsFromJSON(rawBody), nil, stream)
-		return
-	}
-	tool := []byte(`{"type":"image_generation","action":"generate","model":""}`)
-	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, promptForRequest)
-	tool, _ = sjson.SetBytes(tool, "model", toolModel)
-	for _, field := range []string{"size", "quality", "background", "output_format", "moderation"} {
-		if value := strings.TrimSpace(gjson.GetBytes(rawBody, field).String()); value != "" {
-			tool, _ = sjson.SetBytes(tool, field, value)
-		}
-	}
-	for _, field := range []string{"output_compression", "partial_images"} {
-		if value := gjson.GetBytes(rawBody, field); value.Exists() && value.Type == gjson.Number {
-			tool, _ = sjson.SetBytes(tool, field, value.Int())
-		}
-	}
-	tool = setDefaultImageToolSize(tool, defaultSize)
-
-	responsesBody := buildImagesResponsesRequest(promptForRequest, nil, tool)
-	h.forwardImagesRequest(c, "/v1/images/generations", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_generation", stream)
-}
-
-func (h *Handler) ImagesEdits(c *gin.Context) {
-	releaseImage, admitted := admitDirectImageExecution(c)
-	if !admitted {
-		return
-	}
-	defer releaseImage()
-	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
-	if strings.HasPrefix(contentType, "application/json") {
-		h.imagesEditsFromJSON(c)
-		return
-	}
-	if strings.HasPrefix(contentType, "multipart/form-data") || contentType == "" {
-		h.imagesEditsFromMultipart(c)
-		return
-	}
-
-	c.JSON(http.StatusBadRequest, gin.H{
-		"error": gin.H{"message": fmt.Sprintf("Invalid request: unsupported Content-Type %q", contentType), "type": "invalid_request_error"},
-	})
-}
-
-func (h *Handler) imagesEditsFromMultipart(c *gin.Context) {
-	if err := h.captureSignedMultipartIngress(c); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-		return
-	}
-	form, err := c.MultipartForm()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-		return
-	}
-	defer func() { _ = form.RemoveAll() }()
-
-	prompt := strings.TrimSpace(c.PostForm("prompt"))
-	if prompt == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: prompt is required", "type": "invalid_request_error"}})
-		return
-	}
-
-	var imageFiles []*multipart.FileHeader
-	if files := form.File["image[]"]; len(files) > 0 {
-		imageFiles = files
-	} else if files := form.File["image"]; len(files) > 0 {
-		imageFiles = files
-	}
-	if len(imageFiles) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: image is required", "type": "invalid_request_error"}})
-		return
-	}
-	if len(imageFiles) > MaxImageEditInputCount {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": fmt.Sprintf("Invalid request: too many input images (%d, max %d)", len(imageFiles), MaxImageEditInputCount), "type": "invalid_request_error"}})
-		return
-	}
-
-	imageModel := strings.TrimSpace(c.PostForm("model"))
-	modelProvided := imageModel != ""
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
-	requestModel := imageModel
-	if modelProvided {
-		if mappedModel, ok := h.resolveConfiguredRequestModel(imageModel, h.supportedModelIDs(c.Request.Context())); ok {
-			imageModel = mappedModel
-		}
-	}
-	logEffectiveModel := usageEffectiveModelForMapping(requestModel, imageModel, !strings.EqualFold(requestModel, imageModel))
-	if err := validateImagesModel(imageModel); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-		return
-	}
-
-	responseFormat := strings.TrimSpace(c.PostForm("response_format"))
-	if responseFormat == "" {
-		responseFormat = "b64_json"
-	}
-	stream := parseBoolField(c.PostForm("stream"), false)
-
-	style := strings.TrimSpace(c.PostForm("style"))
-	promptForRequest := AppendImageStyleToPrompt(prompt, style)
-	if h.inspectPromptFilterTextOpenAI(c, promptForRequest, "/v1/images/edits", imageModel) {
-		return
-	}
-	if h.enforceAPIKeyLimitsAndReply(c, imageModel) {
-		return
-	}
-
-	// Multipart parsing may have used bounded temporary storage before the
-	// prompt field was known, but image bytes must not be decoded or expanded to
-	// Base64 until the current-user prompt has passed the guard.
-	images := make([]string, 0, len(imageFiles))
-	for _, fileHeader := range imageFiles {
-		dataURL, err := multipartFileToDataURL(fileHeader)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-			return
-		}
-		images = append(images, dataURL)
-	}
-
-	var maskDataURL string
-	if maskFiles := form.File["mask"]; len(maskFiles) > 0 && maskFiles[0] != nil {
-		dataURL, err := multipartFileToDataURL(maskFiles[0])
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-			return
-		}
-		maskDataURL = dataURL
-	}
-	releaseAPIKeyConcurrency, ok := h.acquireAPIKeyConcurrency(c)
-	if !ok {
-		return
-	}
-	if releaseAPIKeyConcurrency != nil {
-		defer releaseAPIKeyConcurrency()
-	}
-	if isGrokImageModel(imageModel) {
-		h.forwardGrokImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, promptForRequest, responseFormat, grokImagesParamsFromForm(c), images, stream)
-		return
-	}
-	tool := buildImagesEditToolFromForm(c, imageModel, maskDataURL)
-	responsesBody := buildImagesResponsesRequest(promptForRequest, images, tool)
-	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream)
-}
+// Multipart parsing may have used bounded temporary storage before the
+// prompt field was known, but image bytes must not be decoded or expanded to
+// Base64 until the current-user prompt has passed the guard.
 
 // captureSignedMultipartIngress preserves the exact wire body for NewAPI HMAC
 // verification, then restores it for net/http multipart parsing. It is only
 // enabled when signed NewAPI audit forwarding is configured, avoiding an
 // extra full-body copy for ordinary image uploads.
-func (h *Handler) captureSignedMultipartIngress(c *gin.Context) error {
-	if h == nil || h.store == nil || c == nil || c.Request == nil {
-		return nil
-	}
-	cfg := h.promptFilterConfigForRequest(c)
-	if !cfg.Advanced.NewAPI.Enabled || strings.TrimSpace(c.GetHeader("X-NewAPI-Signature")) == "" {
-		return nil
-	}
-	body, err := readRawRequestBody(c)
-	if err != nil {
-		return err
-	}
-	setIngressRequestBodyIfAbsent(c, body)
-	c.Request.Body = io.NopCloser(bytes.NewReader(body))
-	c.Request.ContentLength = int64(len(body))
-	return nil
-}
-
-func buildImagesEditToolFromForm(c *gin.Context, imageModel, maskDataURL string) []byte {
-	tool := []byte(`{"type":"image_generation","action":"edit","model":""}`)
-	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, strings.TrimSpace(c.PostForm("prompt")))
-	tool, _ = sjson.SetBytes(tool, "model", toolModel)
-	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
-		if value := strings.TrimSpace(c.PostForm(field)); value != "" {
-			tool, _ = sjson.SetBytes(tool, field, value)
-		}
-	}
-	for _, field := range []string{"output_compression", "partial_images"} {
-		if value := strings.TrimSpace(c.PostForm(field)); value != "" {
-			tool, _ = sjson.SetBytes(tool, field, parseIntField(value, 0))
-		}
-	}
-	if strings.TrimSpace(maskDataURL) != "" {
-		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(maskDataURL))
-	}
-	tool = setDefaultImageToolSize(tool, defaultSize)
-	return tool
-}
-
-func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
-	rawBody, err := readRawRequestBody(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-		return
-	}
-	h.capturePromptRequestIngress(c, rawBody)
-	if !json.Valid(rawBody) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: body must be valid JSON", "type": "invalid_request_error"}})
-		return
-	}
-
-	prompt := strings.TrimSpace(gjson.GetBytes(rawBody, "prompt").String())
-	if prompt == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: prompt is required", "type": "invalid_request_error"}})
-		return
-	}
-
-	images := make([]string, 0)
-	imagesResult := gjson.GetBytes(rawBody, "images")
-	if imagesResult.Exists() && !imagesResult.IsArray() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: invalid images field type", "type": "invalid_request_error"}})
-		return
-	}
-	for _, image := range imagesResult.Array() {
-		if imageURL := strings.TrimSpace(image.Get("image_url").String()); imageURL != "" {
-			images = append(images, imageURL)
-			continue
-		}
-		if image.Get("file_id").Exists() {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: images[].file_id is not supported (use images[].image_url instead)", "type": "invalid_request_error"}})
-			return
-		}
-	}
-	if len(images) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: images[].image_url is required", "type": "invalid_request_error"}})
-		return
-	}
-	if len(images) > MaxImageEditInputCount {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": fmt.Sprintf("Invalid request: too many input images (%d, max %d)", len(images), MaxImageEditInputCount), "type": "invalid_request_error"}})
-		return
-	}
-
-	maskDataURL := strings.TrimSpace(gjson.GetBytes(rawBody, "mask.image_url").String())
-	if maskDataURL == "" && gjson.GetBytes(rawBody, "mask.file_id").Exists() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: mask.file_id is not supported (use mask.image_url instead)", "type": "invalid_request_error"}})
-		return
-	}
-
-	imageModel := strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
-	modelProvided := imageModel != ""
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
-	requestModel := imageModel
-	if modelProvided {
-		if mappedModel, ok := h.resolveConfiguredRequestModel(imageModel, h.supportedModelIDs(c.Request.Context())); ok {
-			imageModel = mappedModel
-		}
-	}
-	logEffectiveModel := usageEffectiveModelForMapping(requestModel, imageModel, !strings.EqualFold(requestModel, imageModel))
-	if err := validateImagesModel(imageModel); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
-		return
-	}
-
-	responseFormat := strings.TrimSpace(gjson.GetBytes(rawBody, "response_format").String())
-	if responseFormat == "" {
-		responseFormat = "b64_json"
-	}
-	stream := gjson.GetBytes(rawBody, "stream").Bool()
-
-	style := strings.TrimSpace(gjson.GetBytes(rawBody, "style").String())
-	promptForRequest := AppendImageStyleToPrompt(prompt, style)
-	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/images/edits", imageModel) {
-		return
-	}
-	if h.enforceAPIKeyLimitsAndReply(c, imageModel) {
-		return
-	}
-	releaseAPIKeyConcurrency, ok := h.acquireAPIKeyConcurrency(c)
-	if !ok {
-		return
-	}
-	if releaseAPIKeyConcurrency != nil {
-		defer releaseAPIKeyConcurrency()
-	}
-	if isGrokImageModel(imageModel) {
-		h.forwardGrokImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, promptForRequest, responseFormat, grokImagesParamsFromJSON(rawBody), images, stream)
-		return
-	}
-	tool := []byte(`{"type":"image_generation","action":"edit","model":""}`)
-	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, promptForRequest)
-	tool, _ = sjson.SetBytes(tool, "model", toolModel)
-	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
-		if value := strings.TrimSpace(gjson.GetBytes(rawBody, field).String()); value != "" {
-			tool, _ = sjson.SetBytes(tool, field, value)
-		}
-	}
-	for _, field := range []string{"output_compression", "partial_images"} {
-		if value := gjson.GetBytes(rawBody, field); value.Exists() && value.Type == gjson.Number {
-			tool, _ = sjson.SetBytes(tool, field, value.Int())
-		}
-	}
-	if maskDataURL != "" {
-		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", maskDataURL)
-	}
-	tool = setDefaultImageToolSize(tool, defaultSize)
-
-	responsesBody := buildImagesResponsesRequest(promptForRequest, images, tool)
-	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream)
-}
-
-func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
-	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
-	req, _ = sjson.SetBytes(req, "model", imagesMainModel())
-
-	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
-	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
-	contentIndex := 1
-	for _, imageURL := range images {
-		if strings.TrimSpace(imageURL) == "" {
-			continue
-		}
-		part := []byte(`{"type":"input_image","image_url":""}`)
-		part, _ = sjson.SetBytes(part, "image_url", imageURL)
-		input, _ = sjson.SetRawBytes(input, fmt.Sprintf("0.content.%d", contentIndex), part)
-		contentIndex++
-	}
-	req, _ = sjson.SetRawBytes(req, "input", input)
-
-	req, _ = sjson.SetRawBytes(req, "tools", []byte(`[]`))
-	if len(toolJSON) > 0 && json.Valid(toolJSON) {
-		req, _ = sjson.SetRawBytes(req, "tools.-1", toolJSON)
-	}
-	return req
-}
 
 // imageCapableAccountFilter 生图上游目前只有 Codex 官方账号支持:中转/Grok
 // 账号拿到 image_generation 请求只会对上游 401/404,还会把自己误标成 unauthorized。
@@ -3545,10 +3075,6 @@ func cloudUploadImage(ctx context.Context, image imageCallResult, idx int) (ref,
 }
 
 // cloudImageURLOnly 仅上传 + 预签名，不写图库。供未接入 DB 的场景（如单测）使用。
-func cloudImageURLOnly(ctx context.Context, image imageCallResult, idx int) (string, bool) {
-	_, url, ok := cloudUploadImage(ctx, image, idx)
-	return url, ok
-}
 
 // buildImageURL 执行注入的 url 构造回调；回调为 nil 时返回 ok=false（回退 data URL）。
 func buildImageURL(ctx context.Context, urlFor imageURLBuilder, image imageCallResult, idx int) (string, bool) {

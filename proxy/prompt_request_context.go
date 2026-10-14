@@ -70,6 +70,9 @@ func releasePromptRequestFrameBody(c *gin.Context) {
 }
 
 func (h *Handler) promptFilterConfigForRequest(c *gin.Context) promptfilter.Config {
+	if h != nil && h.store.CodexOnly() {
+		return h.store.GetPromptFilterConfigSnapshot()
+	}
 	if h == nil || h.store == nil {
 		return promptfilter.DefaultConfig()
 	}

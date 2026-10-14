@@ -3514,6 +3514,7 @@ func (a *Account) GetLastUsedAt() time.Time {
 
 // Store 多账号管理器（数据库 + Token 缓存）
 type Store struct {
+	codexOnly                          atomic.Bool
 	proxyAuditLabels                   map[string]ProxyAuditLabel
 	mu                                 sync.RWMutex
 	accountMutationMu                  sync.Mutex // serializes account-set and scheduler mutations without nesting their locks
@@ -5433,7 +5434,7 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.loadFromDB(ctx); err != nil {
 		return err
 	}
-	if err := s.LoadPromptFilterNewAPIBindings(ctx); err != nil {
+	if err := s.loadCoreCompatibleBindings(ctx); err != nil {
 		return fmt.Errorf("加载 NewAPI 平台绑定失败: %w", err)
 	}
 	s.startSchedulerOutboxConsumer(outboxWatermark)
@@ -5555,6 +5556,9 @@ func antigravityPersistedHardFence(row *database.AccountRow) (reason string, per
 
 // buildAccountFromRow 将数据库账号行转换为运行时账号；凭据缺失或不可用时返回 nil。
 func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRow, modelCooldowns map[int64][]*database.AccountModelCooldownRow) *Account {
+	if s.CodexOnly() && !database.IsNativeCodexCredentials(row.Credentials) {
+		return nil
+	}
 	rt := row.GetCredential("refresh_token")
 	st := row.GetCredential("session_token")
 	at := row.GetCredential("access_token")
@@ -8784,6 +8788,9 @@ func logPromptFilterPatternQuarantines(items []promptfilter.PatternQuarantine) {
 }
 
 func (s *Store) GetPromptFilterConfig() promptfilter.Config {
+	if s.CodexOnly() {
+		return corePromptConfig()
+	}
 	if state, ok := s.promptFilterConfig.Load().(promptFilterConfigState); ok {
 		return promptfilter.NormalizeConfig(state.Config)
 	}
@@ -8796,6 +8803,9 @@ func (s *Store) GetPromptFilterConfig() promptfilter.Config {
 // nested maps or slices on the returned value. Administrative edit paths must
 // continue to use GetPromptFilterConfig, which returns an independent copy.
 func (s *Store) GetPromptFilterConfigSnapshot() promptfilter.Config {
+	if s.CodexOnly() {
+		return corePromptConfig()
+	}
 	if state, ok := s.promptFilterConfig.Load().(promptFilterConfigState); ok {
 		return state.Config
 	}
@@ -9108,6 +9118,9 @@ func (s *Store) AddAccounts(accounts []*Account) {
 	maxConcurrency := s.maxConcurrency.Load()
 	for _, acc := range accounts {
 		if acc == nil {
+			continue
+		}
+		if s.CodexOnly() && (acc.IsOpenAIResponsesAPI() || acc.IsGrokAPI() || acc.IsClaudeOAuth() || acc.IsAntigravityAPI()) {
 			continue
 		}
 		// 记录加入时间（用于过期清理）

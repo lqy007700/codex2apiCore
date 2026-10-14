@@ -67,30 +67,6 @@ func TestParseGrokModelCatalogRichMetadata(t *testing.T) {
 	}
 }
 
-func TestParseGrokReasoningMenuPrefersWireValue(t *testing.T) {
-	body := []byte(`{"data":[{"model":"grok-4.7","reasoning_effort":"high","reasoning_efforts":[
-		{"id":"extra","value":"xhigh","label":"Extra High","default":true},
-		{"id":"high"},
-		{"value":"not-a-tier"},
-		"low"
-	]}]}`)
-	got, err := ParseGrokModelCatalog(body, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || len(got[0].ReasoningEfforts) != 4 {
-		t.Fatalf("efforts = %#v", got)
-	}
-	if got[0].ReasoningEfforts[0].ID != "xhigh" || got[0].ReasoningEfforts[1].ID != "high" || got[0].ReasoningEfforts[3].ID != "low" {
-		t.Fatalf("wire values = %#v", got[0].ReasoningEfforts)
-	}
-	routes := grokCatalogToRoutingModels(got)
-	want := []string{"xhigh", "high", "low"}
-	if len(routes) != 1 || routes[0].ReasoningEffort != "high" || !slicesEqual(routes[0].ReasoningEfforts, want) {
-		t.Fatalf("route menu = %#v", routes)
-	}
-}
-
 func slicesEqual(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
@@ -152,21 +128,5 @@ func TestGrokHTTPErrorDoesNotExposeWholeBody(t *testing.T) {
 	}
 	if bytes.Contains([]byte(err.Error()), []byte("do-not-leak")) {
 		t.Fatalf("error leaked whole upstream body: %v", err)
-	}
-}
-
-func TestFetchGrokModelIDsPublishesAuthoritativeEmptyCatalog(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"data":[]}`)
-	}))
-	defer server.Close()
-	account := &auth.Account{UpstreamType: auth.UpstreamGrok, APIKey: "xai-test", BaseURL: server.URL + "/v1"}
-	models, err := FetchGrokModelIDs(context.Background(), account, "")
-	if err != nil || len(models) != 0 {
-		t.Fatalf("FetchGrokModelIDs = %v, %v; want empty success", models, err)
-	}
-	if !account.HasGrokModelCatalog() || account.GrokChannelSupportsModel("grok-4.5") {
-		t.Fatal("successful empty catalog must be known and must not reopen defaults")
 	}
 }

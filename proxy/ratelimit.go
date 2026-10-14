@@ -126,17 +126,6 @@ func (tb *tokenBucket) getRate() float64 {
 }
 
 // getTokens 获取当前令牌数
-func (tb *tokenBucket) getTokens() float64 {
-	tb.mu.RLock()
-	defer tb.mu.RUnlock()
-
-	elapsed := time.Since(tb.lastRefill).Seconds()
-	tokens := tb.tokens + elapsed*tb.refillRate
-	if tokens > tb.maxTokens {
-		tokens = tb.maxTokens
-	}
-	return tokens
-}
 
 // updateRPM 动态更新RPM
 func (tb *tokenBucket) updateRPM(rpm int) {

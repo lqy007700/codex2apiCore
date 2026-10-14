@@ -11,7 +11,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/codex2api/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -357,8 +356,3 @@ func newAntigravityStreamError(value any) *antigravityStreamError {
 // inside a 200 native Gemini stream like the equivalent HTTP error: status and
 // message for the usage log, the Cloud Code quota cooldown, and no account
 // penalty for a shared capacity shortage (see reportStreamOutcomeFailure).
-func (h *Handler) antigravityStreamErrorOutcome(account *auth.Account, streamErr *antigravityStreamError, resp *http.Response, model string) streamOutcome {
-	outcome := classifyResponseFailedOutcome(streamErr.Body)
-	decision := h.applyResponseFailedCooldown(account, streamErr.Body, resp, model)
-	return applyResponseFailedDecisionKind(outcome, streamErr.Body, decision)
-}

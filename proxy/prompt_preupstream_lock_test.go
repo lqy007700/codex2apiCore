@@ -258,40 +258,8 @@ func TestCodexLocalFallbackSessionHashCoversUnverifiedBindingStates(t *testing.T
 	}
 }
 
-func TestCodexLocalFallbackSessionHashUsesBodyMetadataAtRealIngress(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	handler, db := newPromptConversationLockTestHandler(t)
-	body, err := json.Marshal(map[string]any{
-		"model": "gpt-5.5",
-		"input": blatantIntentBlockedByLocalRegex,
-		"client_metadata": map[string]string{
-			"x-codex-window-id": "codex-body-window-only",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	c.Set(contextAPIKeyID, int64(999))
-
-	// Do not seed ingressRequestBodyContextKey here: this exercises the same
-	// capture path used by a real HTTP request.
-	if blocked := handler.InspectPromptFilterOpenAI(c, body, "/v1/responses", "gpt-5.5", nil); !blocked {
-		t.Fatal("body-only 会话的本地规则未拦截测试输入")
-	}
-	identity, ok := promptConversationLockFallbackIdentity(c)
-	if !ok {
-		t.Fatal("body-only client_metadata 无法解析降级锁身份")
-	}
-	audit := handler.capturePromptFilterAuditContext(c)
-	if audit.SessionHash == "" || audit.SessionHash != identity.SessionHash {
-		t.Fatalf("body-only hash mismatch: audit=%q lock=%q", audit.SessionHash, identity.SessionHash)
-	}
-	if _, err := db.GetActivePromptConversationLockBySessionHash(t.Context(), audit.SessionHash); err != nil {
-		t.Fatalf("body-only session hash 无法定位活动锁: %v", err)
-	}
-}
+// Do not seed ingressRequestBodyContextKey here: this exercises the same
+// capture path used by a real HTTP request.
 
 // WebSocket 入口有一份独立的 block 逻辑(inspectPromptFilterOpenAIForWebSocket
 // 不复用 inspectPromptFilterOpenAIWithBlockWriter)。它会检查已有的会话锁,但

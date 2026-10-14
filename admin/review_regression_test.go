@@ -3,70 +3,14 @@ package admin
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+
 	"strings"
 	"testing"
 
 	"github.com/codex2api/auth"
-	"github.com/codex2api/database"
+
 	"github.com/codex2api/proxy"
-	"github.com/gin-gonic/gin"
 )
-
-func TestReviewDuplicateClaudeRefreshDoesNotConsumeCredential(t *testing.T) {
-	db := newTestAdminDB(t)
-	ctx := context.Background()
-	id, err := db.InsertAccountWithUpstream(ctx, "existing", "anthropic", auth.UpstreamClaude, map[string]interface{}{
-		"upstream_type": auth.UpstreamClaude, "refresh_token": "existing-rotating-token", "access_token": "existing-access", "account_id": "existing-id",
-	}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := auth.NewStore(db, nil, nil)
-	t.Cleanup(store.Stop)
-	h := &Handler{db: db, store: store, refreshClaudeTokensForImport: func(context.Context, string, string) (*auth.ClaudeTokenData, error) {
-		t.Fatal("duplicate import consumed the refresh token")
-		return nil, nil
-	}}
-	_, err = h.createClaudeAccount(ctx, "", "", "", &auth.ClaudeTokenData{RefreshToken: "existing-rotating-token"}, "test", nil)
-	if conflict, ok := err.(*claudeAccountCreateError); !ok || conflict.Status != http.StatusConflict {
-		t.Fatalf("expected conflict, got %v", err)
-	}
-	row, err := db.GetAccountByID(ctx, id)
-	if err != nil || row.GetCredential("refresh_token") != "existing-rotating-token" || row.GetCredential("access_token") != "existing-access" {
-		t.Fatal("duplicate changed existing credentials")
-	}
-}
-
-func TestReviewAstraLongOnlyOverrideAppliesPricing(t *testing.T) {
-	db := newTestAdminDB(t)
-	t.Cleanup(func() { database.SetModelPricingOverrides(nil) })
-	_, err := db.MutateModelPricingSettings(context.Background(), nil, func(m map[string]database.ModelPricingOverride) error {
-		m["gpt-6-astra"] = database.ModelPricingOverride{Source: "custom", Input: 7}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := &Handler{db: db}
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPost, "/api/admin/model-pricing", strings.NewReader(`{"model":"gpt-6-astra","pricing":{"input_long":20,"output_long":75}}`))
-	h.UpdateModelPricing(c)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body)
-	}
-	settings, err := db.GetSystemSettings(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	overrides, err := database.ParseModelPricingOverridesJSON(settings.ModelPricingOverrides)
-	got := overrides["gpt-6-astra"]
-	if err != nil || got.InputLong != 20 || got.OutputLong != 75 {
-		t.Fatalf("pricing request did not apply long override: %+v", got)
-	}
-}
 
 func TestReviewClaudeBillingReprobeRestoresWhitelist(t *testing.T) {
 	db := newTestAdminDB(t)

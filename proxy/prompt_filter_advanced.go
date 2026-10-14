@@ -73,14 +73,6 @@ type sidecarResponse struct {
 	Reason     string   `json:"reason"`
 }
 
-func (h *Handler) applyAdvancedPromptProtection(c *gin.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {
-	verdict = h.applyPromptSemanticProtection(c, text, verdict, cfg)
-	if cfg.Advanced.Risk.Enabled {
-		verdict = h.applyPromptRisk(c, verdict, cfg)
-	}
-	return verdict
-}
-
 func (h *Handler) applyPromptSemanticProtection(c *gin.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {
 	if !cfg.Enabled || verdict.TerminalStrictHit {
 		return verdict
@@ -203,10 +195,6 @@ func hashRiskIdentity(value string) string {
 	}
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:12])
-}
-
-func applyPromptSidecar(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {
-	return (&Handler{}).applyPromptSidecarWithState(ctx, text, verdict, cfg, verdict.Action == promptfilter.ActionAllow)
 }
 
 func (h *Handler) applyPromptSidecarWithState(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config, cleanRequest bool) promptfilter.Verdict {

@@ -1,21 +1,8 @@
-import { StrictMode } from 'react'
-import ReactDOM from 'react-dom/client'
-import { BrowserRouter } from 'react-router-dom'
-import App from './App'
-import './i18n'
-import './index.css'
-
-const rootElement = document.getElementById('root')
-const routerBasename = window.location.pathname.startsWith('/admin') ? '/admin' : undefined
-
-if (!rootElement) {
-  throw new Error('未找到 root 节点')
-}
-
-ReactDOM.createRoot(rootElement).render(
-  <StrictMode>
-    <BrowserRouter basename={routerBasename}>
-      <App />
-    </BrowserRouter>
-  </StrictMode>,
-)
+import {StrictMode} from 'react'
+import {createRoot} from 'react-dom/client'
+import {BrowserRouter} from 'react-router-dom'
+import App from './core/App'
+import './core/styles.css'
+const root=document.getElementById('root')
+if(!root)throw new Error('未找到 root 节点')
+createRoot(root).render(<StrictMode><BrowserRouter basename="/admin"><App/></BrowserRouter></StrictMode>)

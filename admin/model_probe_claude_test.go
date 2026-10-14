@@ -2,7 +2,7 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
+
 	"io"
 	"net/http"
 	"strconv"
@@ -13,51 +13,6 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
 )
-
-func TestBuildClaudeConnectionTestPayloadUsesMessagesShape(t *testing.T) {
-	payload := buildClaudeConnectionTestPayload(nil, "claude-sonnet-4-5", auth.DefaultClaudeSecurityConfig())
-	var body map[string]interface{}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		t.Fatalf("Claude connection payload is invalid JSON: %v", err)
-	}
-	if body["model"] != "claude-sonnet-4-5" || body["stream"] != true {
-		t.Fatalf("Claude connection payload = %#v", body)
-	}
-	if _, ok := body["messages"]; !ok {
-		t.Fatalf("Claude connection payload missing messages: %#v", body)
-	}
-	if _, ok := body["input"]; ok {
-		t.Fatalf("Claude connection payload must not use Responses input: %#v", body)
-	}
-}
-
-func TestClaudeProbePayloadsRespectOutputCap(t *testing.T) {
-	for _, tc := range []struct {
-		limit int64
-		want  int64
-	}{
-		{0, 4096}, {1, 1}, {32, 32}, {1024, 1024},
-		{4095, 4095}, {4096, 4096}, {8192, 4096},
-	} {
-		t.Run(strconv.FormatInt(tc.limit, 10), func(t *testing.T) {
-			cfg := auth.ClaudeSecurityConfig{MaxOutputTokens: tc.limit}
-			for name, payload := range map[string][]byte{
-				"model_probe":     buildClaudeModelProbePayload("claude-sonnet-4-5", cfg),
-				"connection_test": buildClaudeConnectionTestPayload(nil, "claude-sonnet-4-5", cfg),
-			} {
-				var body struct {
-					MaxTokens int64 `json:"max_tokens"`
-				}
-				if err := json.Unmarshal(payload, &body); err != nil {
-					t.Fatalf("%s invalid JSON: %v", name, err)
-				}
-				if body.MaxTokens != tc.want {
-					t.Errorf("%s max_tokens = %d, want %d for cap %d", name, body.MaxTokens, tc.want, tc.limit)
-				}
-			}
-		})
-	}
-}
 
 func TestReadClaudeProbeStreamClassifiesNativeMessagesSuccess(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(

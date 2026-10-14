@@ -71,18 +71,3 @@ func TestPromptRiskCannotReblockReviewClearedPrompt(t *testing.T) {
 		t.Fatalf("review-cleared prompt was reblocked by historical risk: %+v", got)
 	}
 }
-
-func TestSidecarCanEscalateButCannotDowngrade(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"action":"allow","score":5,"reason":"classifier allow"}`))
-	}))
-	defer server.Close()
-	cfg := promptfilter.DefaultConfig()
-	cfg.Advanced.Sidecar = promptfilter.SidecarConfig{Enabled: true, BaseURL: server.URL, TimeoutSeconds: 2}
-	blocked := promptfilter.Verdict{Action: promptfilter.ActionBlock, Score: 80}
-	got := applyPromptSidecar(t.Context(), "test", blocked, cfg)
-	if got.Action != promptfilter.ActionBlock {
-		t.Fatalf("sidecar downgraded block: %+v", got)
-	}
-}

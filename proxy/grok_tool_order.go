@@ -17,12 +17,6 @@ var grokToolOrderMemo = struct {
 	order map[string][]string
 }{order: make(map[string][]string)}
 
-func resetGrokToolOrderMemo() {
-	grokToolOrderMemo.Lock()
-	grokToolOrderMemo.order = make(map[string][]string)
-	grokToolOrderMemo.Unlock()
-}
-
 // grokToolOrderKey 用静态 system + 首条 user 做会话键，故意不把 tools
 // 算进去，否则中途多一个 MCP 工具会换键，首次顺序记忆就断了。
 func grokToolOrderKey(body []byte) string {

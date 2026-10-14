@@ -725,6 +725,9 @@ func (h *Handler) lockPromptConversationOnLocalBlock(c *gin.Context, cfg promptf
 }
 
 func (h *Handler) rejectLockedPromptConversation(c *gin.Context, cfg promptfilter.Config, signedBody, responseBody []byte, endpoint, model string) bool {
+	if h.store.CodexOnly() {
+		return false
+	}
 	item, locked := h.activePromptConversationLock(c, cfg, signedBody, endpoint, model)
 	if !locked {
 		return false

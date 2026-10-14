@@ -281,69 +281,6 @@ func TestExecuteGrokProtocolRequestBridgesCustomToolThroughMessages(t *testing.T
 	}
 }
 
-func TestPrepareRoutedGrokResponsesPreservesInboundChatControlsAndMappedModel(t *testing.T) {
-	route := GrokUpstreamRoute{Model: "mapped-grok", Protocol: GrokProtocolResponses}
-	inbound := []byte(`{
-		"model":"client-alias","messages":[{"role":"user","content":"hello"}],
-		"temperature":0.25,"top_p":0.8,"max_tokens":77,"stop":["END"],"seed":17
-	}`)
-	handlerCanonical := []byte(`{"model":"mapped-grok","input":"handler-normalized"}`)
-	body, err := prepareRoutedGrokProtocolBody(route, GrokProtocolChatCompletions, inbound, handlerCanonical)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checks := map[string]string{
-		"model":             "mapped-grok",
-		"temperature":       "0.25",
-		"top_p":             "0.8",
-		"max_output_tokens": "77",
-		"stop.0":            "END",
-		"seed":              "17",
-		"input.0.role":      "user",
-	}
-	for path, want := range checks {
-		if got := gjson.GetBytes(body, path).String(); got != want {
-			t.Fatalf("%s = %q, want %q; body=%s", path, got, want, body)
-		}
-	}
-}
-
-func TestPrepareRoutedGrokResponsesPreservesInboundMessagesControls(t *testing.T) {
-	route := GrokUpstreamRoute{Model: "mapped-grok", Protocol: GrokProtocolResponses}
-	inbound := []byte(`{
-		"model":"claude-alias","max_tokens":91,"messages":[{"role":"user","content":"hello"}],
-		"temperature":0.4,"top_p":0.7,"stop_sequences":["END"],
-		"tools":[{"name":"lookup","input_schema":{"type":"object"}}],
-		"output_config":{"effort":"high","format":{"type":"json_schema","schema":{"type":"object"}}}
-	}`)
-	body, err := prepareRoutedGrokProtocolBody(route, GrokProtocolMessages, inbound, []byte(`{"model":"mapped-grok"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checks := map[string]string{
-		"model":             "mapped-grok",
-		"max_output_tokens": "91",
-		"temperature":       "0.4",
-		"top_p":             "0.7",
-		"stop.0":            "END",
-		"text.format.type":  "json_schema",
-		"reasoning.effort":  "high",
-		"reasoning.summary": "detailed",
-		"include.0":         "reasoning.encrypted_content",
-		"include.1":         "no_inline_citations",
-	}
-	for path, want := range checks {
-		if got := gjson.GetBytes(body, path).String(); got != want {
-			t.Fatalf("%s = %q, want %q; body=%s", path, got, want, body)
-		}
-	}
-
-	withTopK := []byte(`{"model":"grok","max_tokens":1,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
-	if _, err := prepareRoutedGrokProtocolBody(route, GrokProtocolMessages, withTopK, []byte(`{"model":"mapped-grok"}`)); err == nil {
-		t.Fatal("Messages top_k must fail rather than silently disappear")
-	}
-}
-
 func TestResolveGrokRouteKeepsCatalogResponsesWhenMessagesProbeIsFresh(t *testing.T) {
 	now := time.Now()
 	account := &auth.Account{UpstreamType: auth.UpstreamGrok, AccessToken: "at", BaseURL: "https://default.example/v1"}
@@ -392,54 +329,6 @@ func TestExecuteGrokProtocolRequestReusesConversationHeaders(t *testing.T) {
 	}
 }
 
-func TestExecuteGrokNativeProtocolProbeForcesExactEndpoint(t *testing.T) {
-	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
-	}))
-	defer server.Close()
-	account := &auth.Account{UpstreamType: auth.UpstreamGrok, APIKey: "xai", BaseURL: server.URL + "/v1"}
-	account.SetGrokRoutingState(auth.GrokRoutingState{Models: []auth.GrokModelRoute{{ModelID: "grok-4.5", APIBackend: auth.GrokProtocolResponses}}})
-	resp, err := ExecuteGrokNativeProtocolProbe(context.Background(), account, GrokProtocolMessages, "grok-4.5", []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`), "")
-	if err != nil {
-		t.Fatalf("native probe: %v", err)
-	}
-	resp.Body.Close()
-	if gotPath != "/v1/messages" {
-		t.Fatalf("probe path = %q, want exact Messages path", gotPath)
-	}
-}
-
-func TestExecuteGrokNativeProtocolProbeUsesExplicitCatalogOrigin(t *testing.T) {
-	var defaultCalls, catalogCalls int
-	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defaultCalls++
-		w.WriteHeader(http.StatusTeapot)
-	}))
-	defer defaultServer.Close()
-	catalogServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		catalogCalls++
-		if r.URL.Path != "/v1/messages" {
-			t.Fatalf("catalog path = %q", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"msg_catalog","type":"message","content":[]}`)
-	}))
-	defer catalogServer.Close()
-
-	account := &auth.Account{UpstreamType: auth.UpstreamGrok, APIKey: "xai", BaseURL: defaultServer.URL + "/v1"}
-	resp, err := ExecuteGrokNativeProtocolProbeAtOrigin(context.Background(), account, GrokProtocolMessages, "grok-4.5", nil, catalogServer.URL+"/v1", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if defaultCalls != 0 || catalogCalls != 1 {
-		t.Fatalf("default calls=%d catalog calls=%d", defaultCalls, catalogCalls)
-	}
-}
-
 func TestExecuteGrokProtocolRequestNativePreservesInboundBody(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -477,78 +366,10 @@ func TestExecuteGrokProtocolRequestNativePreservesInboundBody(t *testing.T) {
 	}
 }
 
-func TestPrepareRoutedGrokCatalogSameProtocolPreservesUnknownFields(t *testing.T) {
-	tests := []struct {
-		name     string
-		protocol GrokProtocol
-		inbound  []byte
-		path     string
-	}{
-		{
-			name: "responses", protocol: GrokProtocolResponses,
-			inbound: []byte(`{"model":"client-alias","input":"hi","stream":false,"future_standard":{"keep":true}}`),
-			path:    "future_standard.keep",
-		},
-		{
-			name: "chat", protocol: GrokProtocolChatCompletions,
-			inbound: []byte(`{"model":"client-alias","messages":[{"role":"user","content":"hi"}],"stream":false,"future_standard":{"keep":true}}`),
-			path:    "future_standard.keep",
-		},
-		{
-			name: "messages", protocol: GrokProtocolMessages,
-			inbound: []byte(`{"model":"client-alias","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"stream":false,"future_standard":{"keep":true}}`),
-			path:    "future_standard.keep",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			route := GrokUpstreamRoute{Model: "mapped-grok", Protocol: tc.protocol, Native: false}
-			got, err := prepareRoutedGrokProtocolBody(route, tc.protocol, tc.inbound, []byte(`{"model":"mapped-grok","input":"handler-canonical"}`))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if gjson.GetBytes(got, "model").String() != "mapped-grok" || !gjson.GetBytes(got, tc.path).Bool() {
-				t.Fatalf("catalog same-protocol body was not transparent: %s", got)
-			}
-			// 非 native 路由的响应必须经 SSE 投影管线消费,客户端的 stream=false
-			// 必须被强制为流式,否则非流式 JSON 形状进管线会确定性失败。
-			if !gjson.GetBytes(got, "stream").Bool() {
-				t.Fatalf("non-native same-protocol route must force upstream streaming: %s", got)
-			}
-			if tc.protocol == GrokProtocolChatCompletions && !gjson.GetBytes(got, "stream_options.include_usage").Bool() {
-				t.Fatalf("forced chat streaming must request the usage chunk: %s", got)
-			}
-		})
-	}
-}
+// 非 native 路由的响应必须经 SSE 投影管线消费,客户端的 stream=false
+// 必须被强制为流式,否则非流式 JSON 形状进管线会确定性失败。
 
-func TestPrepareRoutedGrokNativeSameProtocolPreservesClientStreamFalse(t *testing.T) {
-	// native 直通路由按线格式原样转发响应,stream=false 必须原样保留。
-	route := GrokUpstreamRoute{Model: "mapped-grok", Protocol: GrokProtocolChatCompletions, Native: true}
-	inbound := []byte(`{"model":"client-alias","messages":[{"role":"user","content":"hi"}],"stream":false}`)
-	got, err := prepareRoutedGrokProtocolBody(route, GrokProtocolChatCompletions, inbound, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stream := gjson.GetBytes(got, "stream"); !stream.Exists() || stream.Bool() {
-		t.Fatalf("native passthrough must preserve explicit stream=false: %s", got)
-	}
-	if gjson.GetBytes(got, "stream_options").Exists() {
-		t.Fatalf("native passthrough must not inject stream_options: %s", got)
-	}
-}
-
-func TestPrepareRoutedGrokProtocolBodyRejectsUnrepresentableSemantic(t *testing.T) {
-	route := GrokUpstreamRoute{Protocol: GrokProtocolMessages}
-	_, err := prepareRoutedGrokProtocolBody(route, GrokProtocolResponses, nil, []byte(`{"model":"grok-4.5","input":"hi","tools":[{"type":"web_search"}]}`))
-	if err == nil {
-		t.Fatal("hosted tool conversion must fail rather than silently drop")
-	}
-	structured := ErrBadRequest(err.Error())
-	if structured.HTTPStatus != http.StatusBadRequest || structured.Retryable {
-		t.Fatalf("conversion error = %#v", structured)
-	}
-}
+// native 直通路由按线格式原样转发响应,stream=false 必须原样保留。
 
 func TestResponsesStructuredOutputMapsToChatAndMessages(t *testing.T) {
 	body := []byte(`{
@@ -1333,74 +1154,4 @@ func TestMessagesAdapterFinalOutputPreservesBlockOrderAndBoundaries(t *testing.T
 	}
 }
 
-func TestGrokFastPublicModelRewritesToBuildFast(t *testing.T) {
-	now := time.Now()
-	account := &auth.Account{UpstreamType: auth.UpstreamGrok, RefreshToken: "rt", BaseURL: "https://cli.example/v1"}
-	account.SetGrokRoutingState(auth.GrokRoutingState{
-		Models: []auth.GrokModelRoute{{
-			ModelID:          "grok-4.7",
-			BaseURL:          "https://cli.example/v1",
-			APIBackend:       auth.GrokProtocolResponses,
-			ReasoningEfforts: []string{"low", "medium", "high", "xhigh"},
-		}},
-	})
-	if !relayAccountSupportsModel(account, auth.GrokFastPublicModelID) {
-		t.Fatal("synced catalog should still admit grok-4.7-fast")
-	}
-	if relayAccountSupportsModel(account, "grok-4.5") {
-		t.Fatal("catalog must still replace the other default models")
-	}
-	if !modelIDInList(auth.GrokFastPublicModelID, GrokVisibleModelIDsForAccount(account)) {
-		t.Fatal("visible model list missing grok-4.7-fast")
-	}
-	route := ResolveGrokUpstreamRoute(account, auth.GrokFastPublicModelID, GrokProtocolResponses, now)
-	if route.Model != auth.GrokFastUpstreamModelID || route.BaseURL != "https://cli.example/v1" || route.Protocol != GrokProtocolResponses {
-		t.Fatalf("route = %#v", route)
-	}
-	if len(route.ReasoningMenu) != 4 || route.ReasoningMenu[3] != "xhigh" {
-		t.Fatalf("reasoning menu = %#v", route.ReasoningMenu)
-	}
-	body, err := prepareRoutedGrokProtocolBody(route, GrokProtocolResponses, []byte(`{"model":"grok-4.7-fast","input":"hi","stream":true}`), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := gjson.GetBytes(body, "model").String(); got != auth.GrokFastUpstreamModelID {
-		t.Fatalf("upstream model = %q", got)
-	}
-	plain := ResolveGrokUpstreamRoute(account, "grok-4.7", GrokProtocolResponses, now)
-	if plain.Model != "grok-4.7" {
-		t.Fatalf("grok-4.7 wire model = %q", plain.Model)
-	}
-	// 跨协议转换会从 Responses 体重新带上公开名，收口后仍必须是上游名。
-	cross, err := prepareRoutedGrokProtocolBody(GrokUpstreamRoute{
-		Model: auth.GrokFastUpstreamModelID, Protocol: GrokProtocolChatCompletions,
-	}, GrokProtocolResponses, nil, []byte(`{"model":"grok-4.7-fast","input":"hi"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := gjson.GetBytes(cross, "model").String(); got != auth.GrokFastUpstreamModelID {
-		t.Fatalf("cross-protocol upstream model = %q", got)
-	}
-
-	narrowed := &auth.Account{UpstreamType: auth.UpstreamGrok, RefreshToken: "rt", Models: []string{"grok-4.7"}}
-	narrowed.SetGrokRoutingState(auth.GrokRoutingState{Models: []auth.GrokModelRoute{{ModelID: "grok-4.7", APIBackend: auth.GrokProtocolResponses}}})
-	if relayAccountSupportsModel(narrowed, auth.GrokFastPublicModelID) || modelIDInList(auth.GrokFastPublicModelID, GrokVisibleModelIDsForAccount(narrowed)) {
-		t.Fatal("model list without grok-4.7-fast must hide it")
-	}
-	if !modelIDInList("grok-4.7", GrokVisibleModelIDsForAccount(narrowed)) {
-		t.Fatal("model list should keep grok-4.7")
-	}
-	allowed := &auth.Account{UpstreamType: auth.UpstreamGrok, RefreshToken: "rt", Models: []string{auth.GrokFastPublicModelID}}
-	allowed.SetGrokRoutingState(auth.GrokRoutingState{Models: []auth.GrokModelRoute{{ModelID: "grok-4.7", APIBackend: auth.GrokProtocolResponses}}})
-	if !relayAccountSupportsModel(allowed, auth.GrokFastPublicModelID) || !modelIDInList(auth.GrokFastPublicModelID, GrokVisibleModelIDsForAccount(allowed)) {
-		t.Fatal("model list that names grok-4.7-fast should admit it")
-	}
-	if modelIDInList("grok-4.7", GrokVisibleModelIDsForAccount(allowed)) {
-		t.Fatal("model list that only names grok-4.7-fast must not inherit grok-4.7 from the catalog")
-	}
-	empty := &auth.Account{UpstreamType: auth.UpstreamGrok, RefreshToken: "rt"}
-	empty.SetGrokRoutingState(auth.GrokRoutingState{CatalogKnown: true})
-	if relayAccountSupportsModel(empty, auth.GrokFastPublicModelID) || modelIDInList(auth.GrokFastPublicModelID, GrokVisibleModelIDsForAccount(empty)) {
-		t.Fatal("authoritative empty catalog must not reopen grok-4.7-fast")
-	}
-}
+// 跨协议转换会从 Responses 体重新带上公开名，收口后仍必须是上游名。

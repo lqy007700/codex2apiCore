@@ -213,18 +213,6 @@ func ErrUpstreamTimeout(cause error) *Error {
 }
 
 // ErrUpstreamStreamBreak creates an upstream stream break error
-func ErrUpstreamStreamBreak(message string) *Error {
-	if message == "" {
-		message = "Upstream stream ended prematurely"
-	}
-	return &Error{
-		Code:       ErrorCodeUpstreamStreamBreak,
-		Message:    message,
-		Type:       ErrorTypeUpstreamError,
-		Retryable:  true,
-		HTTPStatus: http.StatusBadGateway,
-	}
-}
 
 // ErrNoAvailableAccount creates a no available account error
 func ErrNoAvailableAccount() *Error {
@@ -267,15 +255,6 @@ func ErrBadRequest(message string) *Error {
 }
 
 // ErrMissingModel creates a missing model error
-func ErrMissingModel() *Error {
-	return &Error{
-		Code:       ErrorCodeMissingModel,
-		Message:    "model is required",
-		Type:       ErrorTypeInvalidRequest,
-		Retryable:  false,
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
 
 // ==================== Helper Functions ====================
 

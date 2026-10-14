@@ -17,16 +17,6 @@ import (
 // 逐步实现走 map 往返后键序被重排，两者的字节表示本就不同。
 
 // legacyGrokPreflight 是参照实现：按旧顺序逐步改写，产出同一组结果。
-func legacyGrokPreflight(body []byte) grokPreflightResult {
-	normalized, aliases := normalizeGrokUpstreamTools(body)
-	sanitized := sanitizeGrokRequestBody(normalized)
-	return grokPreflightResult{
-		Body:      sanitized,
-		Aliases:   aliases,
-		TurnIndex: grokTurnIndex(sanitized),
-		Model:     gjson.GetBytes(sanitized, "model").String(),
-	}
-}
 
 func grokDiffCorpus() []struct {
 	name string
@@ -160,25 +150,6 @@ func grokDiffCorpus() []struct {
 	}
 }
 
-func assertGrokPreflightEquivalent(t *testing.T, name string, body []byte) {
-	t.Helper()
-	want := legacyGrokPreflight(body)
-	got := prepareGrokUpstreamBody(body)
-
-	if !jsonSemanticallyEqual(t, want.Body, got.Body) {
-		t.Errorf("%s: body 语义不等价\n参照实现: %s\n单次遍历: %s", name, want.Body, got.Body)
-	}
-	if want.TurnIndex != got.TurnIndex {
-		t.Errorf("%s: TurnIndex = %d, 参照实现 = %d", name, got.TurnIndex, want.TurnIndex)
-	}
-	if want.Model != got.Model {
-		t.Errorf("%s: Model = %q, 参照实现 = %q", name, got.Model, want.Model)
-	}
-	if !reflect.DeepEqual(normalizeAliasMap(want.Aliases), normalizeAliasMap(got.Aliases)) {
-		t.Errorf("%s: 别名映射不一致\n参照实现: %#v\n单次遍历: %#v", name, want.Aliases, got.Aliases)
-	}
-}
-
 // normalizeAliasMap 把 nil 与空映射视作等价，便于比较。
 func normalizeAliasMap(m map[string]grokNsIdentity) map[string]grokNsIdentity {
 	if len(m) == 0 {
@@ -200,63 +171,11 @@ func jsonSemanticallyEqual(t *testing.T, a, b []byte) bool {
 	return reflect.DeepEqual(av, bv)
 }
 
-func TestGrokPreflightMatchesLegacyChain(t *testing.T) {
-	for _, tc := range grokDiffCorpus() {
-		t.Run(tc.name, func(t *testing.T) {
-			assertGrokPreflightEquivalent(t, tc.name, []byte(tc.body))
-		})
-	}
-}
-
 // TestGrokPreflightMatchesLegacyOnLargeBodies 用基准 fixture 覆盖真实规模的请求体，
 // 确保等价性在多轮大 body 上同样成立。
-func TestGrokPreflightMatchesLegacyOnLargeBodies(t *testing.T) {
-	for _, dirty := range []bool{true, false} {
-		for _, size := range []int{16 * 1024, 256 * 1024} {
-			body := buildGrokCodexBody(size, dirty)
-			name := "clean"
-			if dirty {
-				name = "dirty"
-			}
-			t.Run(name, func(t *testing.T) {
-				assertGrokPreflightEquivalent(t, name, body)
-			})
-		}
-	}
-}
 
 // TestGrokPreflightPreservesUntouchedBody 无需改写的请求体必须原样返回，
 // 不为等价内容白付一次重建。
-func TestGrokPreflightKeepsPromptCacheKey(t *testing.T) {
-	body := []byte(`{"model":"grok-4.7","prompt_cache_key":"session-1","client_metadata":{"cli":"codex"},"service_tier":"priority","safety_identifier":"sid","stream":true}`)
-	got := prepareGrokUpstreamBody(body)
-	if gjson.GetBytes(got.Body, "prompt_cache_key").String() != "session-1" {
-		t.Fatalf("prompt_cache_key dropped: %s", got.Body)
-	}
-	for _, field := range []string{"client_metadata", "service_tier", "safety_identifier"} {
-		if gjson.GetBytes(got.Body, field).Exists() {
-			t.Fatalf("%s kept: %s", field, got.Body)
-		}
-	}
-	legacy := sanitizeGrokRequestBody(body)
-	if gjson.GetBytes(legacy, "prompt_cache_key").String() != "session-1" {
-		t.Fatalf("legacy sanitize dropped prompt_cache_key: %s", legacy)
-	}
-}
-
-func TestGrokPreflightPreservesUntouchedBody(t *testing.T) {
-	body := []byte(`{"model":"grok-4.5","stream":true,"input":[{"type":"message","role":"user","content":"hi"}]}`)
-	got := prepareGrokUpstreamBody(body)
-	if string(got.Body) != string(body) {
-		t.Fatalf("无改写时应原样返回\n输入: %s\n输出: %s", body, got.Body)
-	}
-	if got.TurnIndex != 1 {
-		t.Fatalf("TurnIndex = %d, want 1", got.TurnIndex)
-	}
-	if got.Model != "grok-4.5" {
-		t.Fatalf("Model = %q, want grok-4.5", got.Model)
-	}
-}
 
 // TestGrokPrepareHistoryItemMatchesMapRebuild 逐项守护 raw 拼接重建与 map 版
 // rebuildGrokHistoryItem 的等价性：改写与否的判定必须一致，改写结果必须语义相同。

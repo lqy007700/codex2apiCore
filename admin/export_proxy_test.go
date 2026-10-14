@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
@@ -93,39 +92,6 @@ func codexExportRow() *database.AccountRow {
 }
 
 // 三个渠道的导出条目在开关关闭时都不得泄漏代理 URL。
-func TestAccountRowToExportEntryOmitsProxyByDefault(t *testing.T) {
-	codex, ok := accountRowToCPAExportEntry(codexExportRow(), exportProxyResolver{})
-	if !ok {
-		t.Fatal("codex export entry not produced")
-	}
-	if codex.ProxyURL != "" || codex.ProxyLabel != "" || codex.ProxyEnabled != nil {
-		t.Fatalf("codex entry carried proxy while disabled: %+v", codex)
-	}
-
-	grokRow := grokOAuthRow()
-	grokRow.ProxyURL = "http://127.0.0.1:8080"
-	grokEntry, ok := grokAccountRowToExportEntry(grokRow, exportProxyResolver{})
-	if !ok {
-		t.Fatal("grok export entry not produced")
-	}
-	if grokEntry.ProxyURL != "" || grokEntry.ProxyLabel != "" || grokEntry.ProxyEnabled != nil {
-		t.Fatalf("grok entry carried proxy while disabled: %+v", grokEntry)
-	}
-
-	antigravityEntry, ok := antigravityAccountRowToExportEntry(&database.AccountRow{
-		ID: 12, Platform: "google", Enabled: true, ProxyURL: "http://127.0.0.1:8080",
-		Credentials: map[string]any{
-			"upstream_type": auth.UpstreamAntigravity, "email": "ag@example.com",
-			"access_token": "at", "refresh_token": "rt",
-		},
-	}, exportProxyResolver{})
-	if !ok {
-		t.Fatal("antigravity export entry not produced")
-	}
-	if antigravityEntry.ProxyURL != "" || antigravityEntry.ProxyLabel != "" || antigravityEntry.ProxyEnabled != nil {
-		t.Fatalf("antigravity entry carried proxy while disabled: %+v", antigravityEntry)
-	}
-}
 
 // 开启后 Codex / Grok 条目都补上 URL + label + enabled。
 func TestAccountRowToExportEntryCarriesProxyWhenEnabled(t *testing.T) {

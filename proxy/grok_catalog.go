@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
+
 	"errors"
 	"fmt"
 	"io"
@@ -446,39 +446,5 @@ func FetchGrokModelCatalog(ctx context.Context, account *auth.Account, proxyURL,
 	return result, nil
 }
 
-func grokCatalogToRoutingModels(models []GrokModelCatalogItem) []auth.GrokModelRoute {
-	result := make([]auth.GrokModelRoute, 0, len(models))
-	for _, model := range models {
-		extra := make(map[string]string, len(model.ExtraHeaders))
-		for key, values := range model.ExtraHeaders {
-			if len(values) > 0 {
-				extra[key] = values[len(values)-1]
-			}
-		}
-		hidden := model.Hidden != nil && *model.Hidden
-		efforts := make([]string, 0, len(model.ReasoningEfforts))
-		for _, option := range model.ReasoningEfforts {
-			if option.ID != "" {
-				efforts = append(efforts, option.ID)
-			}
-		}
-		result = append(result, auth.GrokModelRoute{
-			ModelID: model.ID, BaseURL: model.BaseURL, APIBaseURL: model.APIBaseURL,
-			APIBackend: model.APIBackend, ExtraHeaders: extra, SupportedInAPI: model.SupportedInAPI,
-			Hidden: hidden, ContextWindow: model.ContextWindow, MaxCompletionTokens: model.MaxCompletionTokens,
-			SupportsReasoningEffort: model.SupportsReasoningEffort != nil && *model.SupportsReasoningEffort,
-			ReasoningEffort:         model.ReasoningEffort,
-			ReasoningEfforts:        auth.NormalizeGrokReasoningMenu(efforts),
-			SupportsBackendSearch:   model.SupportsBackendSearch != nil && *model.SupportsBackendSearch,
-			StreamToolCalls:         model.StreamToolCalls != nil && *model.StreamToolCalls,
-			FirstSeenAt:             model.FirstSeenAt,
-		})
-	}
-	return result
-}
-
 // MarshalGrokCatalogItem is a stable helper for database/admin adapters that
 // need the exact field-presence metadata without depending on gjson internals.
-func MarshalGrokCatalogItem(item GrokModelCatalogItem) ([]byte, error) {
-	return json.Marshal(item)
-}

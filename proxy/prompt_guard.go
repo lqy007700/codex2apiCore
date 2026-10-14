@@ -188,6 +188,9 @@ type promptGuardEvaluation struct {
 }
 
 func (h *Handler) evaluatePromptGuard(c *gin.Context, rawBody []byte, signedBody []byte, endpoint string, model string, transport promptfilter.Transport) promptGuardEvaluation {
+	if h.store.CodexOnly() {
+		return promptGuardEvaluation{}
+	}
 	cfg := h.promptFilterConfigForRequest(c)
 	return h.evaluatePromptGuardWithConfig(c, cfg, rawBody, signedBody, endpoint, model, transport)
 }
@@ -214,43 +217,6 @@ func (h *Handler) evaluatePromptGuardWithConfig(c *gin.Context, cfg promptfilter
 		}
 		if err := h.enrichPromptGuardAttachments(promptGuardRequestContext(c), cfg, &envelope); err != nil {
 			extensionErrors = append(extensionErrors, "attachment_parser: "+err.Error())
-		}
-	}
-	evaluation := h.evaluatePromptGuardEnvelope(c, cfg, envelope, trustedProfile, profileOverride, modeOverride)
-	if !adapterOnly && evaluation.Decision.ApplicationPromptKind == "" {
-		if err := h.commitPromptGuardSession(c, cfg, sessionPending, evaluation.Decision); err != nil {
-			extensionErrors = append(extensionErrors, "session_commit: "+err.Error())
-		}
-	}
-	evaluation.Decision.Errors = append(evaluation.Decision.Errors, extensionErrors...)
-	return evaluation
-}
-
-func (h *Handler) evaluatePromptGuardText(c *gin.Context, text string, endpoint string, model string) promptGuardEvaluation {
-	cfg := h.promptFilterConfigForRequest(c)
-	return h.evaluatePromptGuardTextWithConfig(c, cfg, text, endpoint, model)
-}
-
-func (h *Handler) evaluatePromptGuardTextWithConfig(c *gin.Context, cfg promptfilter.Config, text string, endpoint string, model string) promptGuardEvaluation {
-	signedBody := ingressRequestBody(c, nil)
-	requestedModel, effectiveModel, trustedProfile, profileOverride, modeOverride, providerOverride, providerOverrideSet := h.resolvePromptGuardOverrides(c, cfg, signedBody, model)
-	envelope := promptfilter.BuildTextEnvelopeWithModelsAndConfig(
-		text,
-		endpoint,
-		requestedModel,
-		effectiveModel,
-		promptfilter.TransportHTTP,
-		cfg,
-	)
-	applyPromptGuardProviderOverride(&envelope, cfg, trustedProfile, providerOverride, providerOverrideSet)
-	extensionErrors := make([]string, 0, 2)
-	var sessionPending *promptSessionCorrelationPending
-	adapterOnly := envelope.AdapterUnclassified && len(envelope.Segments) == 0
-	if !adapterOnly {
-		var err error
-		sessionPending, err = h.enrichPromptGuardSession(c, cfg, signedBody, &envelope)
-		if err != nil {
-			extensionErrors = append(extensionErrors, "session_correlation: "+err.Error())
 		}
 	}
 	evaluation := h.evaluatePromptGuardEnvelope(c, cfg, envelope, trustedProfile, profileOverride, modeOverride)

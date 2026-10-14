@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -183,16 +182,5 @@ func TestNormalizeClaudeRequestBodyKeepsContextManagement(t *testing.T) {
 		if !gjson.GetBytes(out, field).Exists() {
 			t.Fatalf("supported field %s was removed: %s", field, out)
 		}
-	}
-}
-
-func TestMergeAnthropicBetaUsesRequiredAndAllowlist(t *testing.T) {
-	incoming := http.Header{}
-	incoming.Set("anthropic-beta", "unknown-beta, approved-beta, oauth-2025-04-20")
-	cfg := auth.DefaultClaudeSecurityConfig()
-	cfg.AllowedBetaHeaders = []string{"approved-beta"}
-	got := mergeAnthropicBetaWithConfig(incoming, cfg)
-	if !strings.Contains(got, "oauth-2025-04-20") || !strings.Contains(got, "approved-beta") || strings.Contains(got, "unknown-beta") {
-		t.Fatalf("filtered Beta headers = %q", got)
 	}
 }

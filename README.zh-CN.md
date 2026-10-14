@@ -1,3 +1,5 @@
+> 当前二开分支将项目精简为供 New API 调用的 Codex 账号池服务。功能边界、接入方式和验证说明见 [账号池服务说明](docs/CORE_ACCOUNT_SERVICE.md)。下方保留的上游文档包含已移除功能，请以分支说明和实际注册路由为准。
+
 <p align="center">
   <img src="assets/banner.svg" alt="Codex2API" width="100%">
 </p>

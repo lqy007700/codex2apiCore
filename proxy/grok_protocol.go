@@ -1746,73 +1746,15 @@ func adaptGrokProtocolResponse(resp *http.Response, protocol GrokProtocol, model
 // probing; production requests must use ExecuteGrokProtocolRequest.
 // The returned successful body remains in its native wire shape so the caller
 // can validate that protocol's actual terminal event/usage without conversion.
-func ExecuteGrokNativeProtocolProbe(ctx context.Context, account *auth.Account, protocol GrokProtocol, model string, body []byte, proxyOverride string) (*http.Response, error) {
-	return ExecuteGrokNativeProtocolProbeAtOriginWithHeaders(ctx, account, protocol, model, body, "", proxyOverride, nil)
-}
 
 // ExecuteGrokNativeProtocolProbeAtOrigin probes the catalog item's concrete
 // origin. Empty origin is a safe compatibility fallback to the account base.
 // Callers must pass origins obtained from the persisted, sanitized catalog.
-func ExecuteGrokNativeProtocolProbeAtOrigin(ctx context.Context, account *auth.Account, protocol GrokProtocol, model string, body []byte, origin, proxyOverride string) (*http.Response, error) {
-	return ExecuteGrokNativeProtocolProbeAtOriginWithHeaders(ctx, account, protocol, model, body, origin, proxyOverride, nil)
-}
 
 // ExecuteGrokNativeProtocolProbeAtOriginWithHeaders is the catalog-aware probe
 // variant. extraHeaders must come from the persisted, sanitized model catalog;
 // it is filtered again here and credential/security headers are re-applied last
 // so a stale or manually-edited row cannot override authentication identity.
-func ExecuteGrokNativeProtocolProbeAtOriginWithHeaders(ctx context.Context, account *auth.Account, protocol GrokProtocol, model string, body []byte, origin, proxyOverride string, extraHeaders map[string]string) (*http.Response, error) {
-	protocol = auth.NormalizeGrokProtocol(string(protocol))
-	if protocol == "" {
-		return nil, fmt.Errorf("unsupported Grok protocol")
-	}
-	if account == nil {
-		return nil, ErrNoAvailableAccount()
-	}
-	baseURL, bearer := account.GrokCredentials()
-	if candidate := strings.TrimRight(strings.TrimSpace(origin), "/"); candidate != "" {
-		baseURL = candidate
-	}
-	if baseURL == "" || bearer == "" {
-		return nil, ErrNoAvailableAccount()
-	}
-	if len(body) == 0 {
-		body = MinimalGrokProbeBody(protocol, model)
-	}
-	endpoint := auth.OpenAIResponsesEndpoint(baseURL, grokProtocolSuffix(protocol))
-	account.Mu().RLock()
-	proxyURL := account.ProxyURL
-	account.Mu().RUnlock()
-	if proxyOverride != "" {
-		proxyURL = proxyOverride
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, ErrInternalError("创建 Grok 探针请求失败", err)
-	}
-	applyGrokRequestHeaders(req, account, bearer, nil, nil)
-	for name, values := range routeHeaders(extraHeaders) {
-		for _, value := range values {
-			req.Header.Set(name, value)
-		}
-	}
-	applyGrokRequestHeaders(req, account, bearer, nil, nil)
-	req.Header.Set("Accept-Encoding", "gzip, br, deflate")
-	req.Header.Set("x-grok-turn-idx", "1")
-	if model != "" {
-		req.Header.Set("x-grok-model-override", model)
-	}
-	if protocol == GrokProtocolMessages {
-		req.Header.Set("anthropic-version", "2023-06-01")
-	}
-	resp, err := doTracedUpstreamRequest(getPooledClient(account, proxyURL), req, account, proxyURL)
-	if err != nil {
-		return nil, ErrUpstream(0, "请求 Grok 原生协议探针失败", err)
-	}
-	decodeGrokResponseEncoding(resp)
-	recordGrokUpstreamObservationsAtOrigin(account, resp.Header, baseURL)
-	return resp, nil
-}
 
 func canonicalGrokResponsesBody(inbound GrokProtocol, inboundBody, responsesBody []byte) ([]byte, error) {
 	if len(responsesBody) == 0 {
@@ -1871,10 +1813,6 @@ func rewriteGrokProtocolModel(body []byte, model string) ([]byte, error) {
 		return body, nil
 	}
 	return sjson.SetBytes(body, "model", model)
-}
-
-func prepareRoutedGrokProtocolRequest(route GrokUpstreamRoute, inbound GrokProtocol, inboundBody, responsesBody []byte) (grokPreflightResult, error) {
-	return prepareRoutedGrokProtocolRequestWithCompaction(route, inbound, inboundBody, responsesBody, nil)
 }
 
 func prepareRoutedGrokProtocolRequestWithCompaction(route GrokUpstreamRoute, inbound GrokProtocol, inboundBody, responsesBody []byte, preservedCompaction compactionProvenanceDigests) (grokPreflightResult, error) {
@@ -1975,11 +1913,6 @@ func finishGrokRoutedPreflight(route GrokUpstreamRoute, result grokPreflightResu
 	result.Body = updated
 	result.Model = model
 	return result
-}
-
-func prepareRoutedGrokProtocolBody(route GrokUpstreamRoute, inbound GrokProtocol, inboundBody, responsesBody []byte) ([]byte, error) {
-	preflight, err := prepareRoutedGrokProtocolRequest(route, inbound, inboundBody, responsesBody)
-	return preflight.Body, err
 }
 
 func validGrokClientVersion(value string) bool {
@@ -2190,16 +2123,3 @@ func relayUpstreamEndpointForProtocol(account *auth.Account, inbound GrokProtoco
 
 // MinimalGrokProbeBody returns the low-cost native wire body expected by
 // ExecuteGrokProtocolRequest callers that explicitly probe a protocol.
-func MinimalGrokProbeBody(protocol GrokProtocol, model string) []byte {
-	switch auth.NormalizeGrokProtocol(string(protocol)) {
-	case GrokProtocolChatCompletions:
-		body, _ := json.Marshal(map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}, "max_completion_tokens": 1, "stream": true, "stream_options": map[string]any{"include_usage": true}})
-		return body
-	case GrokProtocolMessages:
-		body, _ := json.Marshal(map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}, "max_tokens": 1, "stream": true})
-		return body
-	default:
-		body, _ := json.Marshal(map[string]any{"model": model, "input": "hi", "max_output_tokens": 1, "reasoning": map[string]any{"effort": "low"}, "store": false, "stream": true})
-		return body
-	}
-}

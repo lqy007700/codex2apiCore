@@ -1,0 +1,74 @@
+# Codex 账号池服务（二开分支）
+
+本分支将 codex2api 作为 New API 的后端账号管理与请求执行服务。New API 负责用户、对外分发和计费；此服务负责原生 Codex 凭据、指纹、上游连接、账号调度和执行日志。
+
+## 保留范围
+
+- 原生 Codex 账号导入、Token 刷新、配额查询、启停、健康度、并发、冷却与恢复。
+- HTTP 和上游 WebSocket 连接、代理、连接复用、请求取消及流式执行。
+- 设备与会话指纹收敛、账号请求头覆盖、客户端版本配置及同步。
+- Responses 上下文连续性、compact、工具调用、推理内容及图片输入。
+- 渠道密钥鉴权、请求日志、基础用量和健康检查。
+- `/admin/` 后台：账号池、调度状态、代理出口、请求日志、渠道密钥和运行设置。
+
+账号池只加载原生 Codex 凭据。数据库保留旧渠道记录与迁移结构以兼容已有数据；它们不会进入 Codex 调度池。已裁剪的审核配置在服务模式中不生效。
+
+单账号管理入口和显式 ID 的批量操作也校验渠道。批次包含旧的非 Codex 账号时，整个请求在执行前拒绝，避免更改这些保留记录。账号列表使用服务端分页与搜索。
+
+## 已退出服务范围
+
+其他渠道的管理入口、生图/视频、Realtime、Gemini 原生入口、公开门户、Prompt 审核管理、质量测试及随机客户端遥测发送已移除。
+
+原后台的仪表盘分析、回收站管理、订阅与每日结算视图、账号分组管理、综合运维报表等入口不再注册。凭据导入/OAuth、调度并发、模型冷却、账号模型配置和代理绑定入口仍保留。
+
+第一轮裁剪以入口、启动任务、控制器与前端为边界。部分共享代码、数据库字段和历史测试仍保留，因此这不是一次完整的数据库或所有适配器源码删除。
+
+## 请求接口
+
+以下入口需要渠道 API Key：
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /v1/responses` | Responses 执行 |
+| `GET /v1/responses` | 下游 WebSocket 升级 |
+| `POST /v1/responses/compact` | 上下文压缩 |
+| `POST /v1/responses/input_tokens` | 输入 Token 计数 |
+| `POST /v1/chat/completions` | Chat Completions 兼容 |
+| `POST /v1/messages` | Messages 兼容，实际使用 Codex 池 |
+| `POST /v1/messages/count_tokens` | Messages Token 计数 |
+| `GET /v1/models` | 模型列表 |
+
+无 `/v1` 前缀的对应兼容入口也保留。`/backend-api/codex` 下保留 Responses、WebSocket、compact 和模型清单。服务健康检查使用 `/health`；管理接口使用独立的 `X-Admin-Key`。
+
+## New API 接入
+
+1. 打开 `/admin/`，完成首次初始化或使用管理密钥登录。
+2. 导入 Codex 账号，配置代理、指纹与单账号并发，检查账号状态及配额。
+3. 在“渠道密钥”中创建供 New API 使用的 API Key。
+4. 在 New API 中配置可发送 OpenAI Responses/Chat Completions 请求的渠道，填写此服务地址及渠道 Key。服务地址示例为 `http://<服务主机>:8080`；最终请求路径应为 `/v1/responses` 或 `/v1/chat/completions`，避免重复添加 `/v1`。
+5. New API 与此服务位于 Docker 中时，使用它们共有网络中的服务名和容器端口；各容器的 `127.0.0.1` 指向自身。
+
+New API 的终端用户密钥与此服务的渠道密钥属于不同鉴权层。不要把管理密钥用作渠道密钥。
+
+两层重试需要共同设置次数和时间预算。后端换号受现有执行安全边界约束；已经输出语义内容后的失败不能通过盲目重放补救。通过 New API 的真实请求仍需验证会话头/元数据转发与多轮上下文连续性。
+
+## 本地验证
+
+需要项目指定的 Go 1.26.9 和 Node/npm 环境。
+
+```sh
+cd frontend
+npm ci
+npm test
+npm run typecheck
+npm run build
+npm run test:browser
+cd ..
+go test ./...
+```
+
+浏览器测试使用 Playwright 和本机 Chrome，启动 `127.0.0.1:4177` 测试服务器并模拟管理 API；验证登录、分页搜索、指纹配置、SSE 导入、设置增量更新、页面导航、手机布局和密钥过期。CI 先通过 Playwright 安装 Chrome，再运行同一浏览器测试。它不验证真实上游凭据或推理。
+
+Go 测试覆盖服务入口/设置边界、Codex 池过滤、凭据约束，以及已有连接、调度、指纹和上下文回归。测试使用的本地监听必须被运行环境允许。
+
+当前改造已通过上述本地测试与构建。尚未部署，也未通过 New API 发起真实推理；上线前需要单独完成真实链路联调。

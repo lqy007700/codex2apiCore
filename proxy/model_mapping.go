@@ -313,23 +313,6 @@ func (h *Handler) applyAccountModelMappingToBodyForModels(rawBody []byte, accoun
 	return updatedBody, mappedModel, true
 }
 
-func (h *Handler) resolveConfiguredRequestModel(model string, supportedModels []string) (string, bool) {
-	model = strings.TrimSpace(model)
-	if model == "" || h == nil || h.store == nil {
-		return model, false
-	}
-	resolved := false
-	if entry, ok := resolveReasoningEffortModelAlias(model, h.store.GetReasoningEffortModels(), supportedModels); ok {
-		model = entry.Model
-		resolved = true
-	}
-	mappedModel, ok := resolveConfiguredModelMapping(model, h.store.GetCodexModelMapping(), supportedModels)
-	if !ok || mappedModel == "" || mappedModel == model {
-		return model, resolved
-	}
-	return mappedModel, true
-}
-
 func usageEffectiveModelForMapping(originalModel string, effectiveModel string, mapped bool) string {
 	if !mapped {
 		return ""

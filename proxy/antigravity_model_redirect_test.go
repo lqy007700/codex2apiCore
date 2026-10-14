@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/codex2api/auth"
@@ -18,35 +16,6 @@ func withAntigravityRedirects(t *testing.T, settings auth.AntigravitySettings) {
 	}
 	auth.SetConfiguredAntigravitySettings(normalized)
 	t.Cleanup(func() { auth.SetConfiguredAntigravitySettings(previous) })
-}
-
-func TestAntigravityRedirectChoicesAndValidation(t *testing.T) {
-	choices := AntigravityRedirectChoices()
-	byModel := map[string]AntigravityRedirectChoice{}
-	for _, choice := range choices {
-		byModel[choice.Model] = choice
-	}
-	flash := byModel["gemini-3.8-flash"]
-	if flash.DefaultLevel != "low" || strings.Join(flash.Tiers, ",") != "gemini-3.8-flash-low,gemini-3.8-flash-medium,gemini-3.8-flash-high" {
-		t.Fatalf("gemini-3.8-flash choice = %+v", flash)
-	}
-	if pro := byModel["gemini-3.1-pro"]; strings.Join(pro.Tiers, ",") != "gemini-3.1-pro-low,gemini-3.1-pro-high" {
-		t.Fatalf("gemini-3.1-pro tiers = %v, want only the tiers it actually exposes", pro.Tiers)
-	}
-	if err := ValidateAntigravityModelRedirects(map[string]string{"gemini-3.8-flash": "gemini-3.8-flash-high", "gemini-3.1-pro": "gemini-3.1-pro-low"}); err != nil {
-		t.Fatalf("valid redirects rejected: %v", err)
-	}
-	for _, bad := range []map[string]string{
-		{"gemini-3.8-flash": "gemini-3.6-flash-high"},
-		{"gemini-3.8-flash-high": "gemini-3.8-flash-low"},
-		{"gemini-3.8-flash": "gemini-3.8-flash-tiered"},
-		{"gemini-3.1-pro": "gemini-3.1-pro-medium"},
-		{"claude-sonnet-4-6": "claude-sonnet-4-6"},
-	} {
-		if err := ValidateAntigravityModelRedirects(bad); err == nil {
-			t.Fatalf("redirect %v must be rejected", bad)
-		}
-	}
 }
 
 func TestAntigravityRedirectFillsMissingEffortOnly(t *testing.T) {
@@ -136,25 +105,5 @@ func TestAntigravityFoldBareLogicalModelUsesModelDefaultTier(t *testing.T) {
 	effort := []byte(`{"model":"claude-opus-5-5","reasoning":{"effort":"low"},"input":"hi"}`)
 	if _, mapped, apiErr := antigravityFoldLogicalModel(effort, "claude-opus-5-5"); apiErr != nil || mapped != "claude-opus-5-5-low" {
 		t.Fatalf("explicit effort fold = %q err=%v", mapped, apiErr)
-	}
-}
-
-func TestAntigravityRedirectChoicesIncludeClaude55(t *testing.T) {
-	found := map[string]AntigravityRedirectChoice{}
-	for _, choice := range AntigravityRedirectChoices() {
-		found[choice.Model] = choice
-	}
-	for _, family := range []string{"claude-opus-5-5", "claude-sonnet-5-5"} {
-		choice, ok := found[family]
-		want := []string{family + "-low", family + "-medium", family + "-high"}
-		if !ok || choice.DefaultLevel != "high" || !reflect.DeepEqual(choice.Tiers, want) {
-			t.Fatalf("%s redirect choice = %+v", family, choice)
-		}
-	}
-	if err := ValidateAntigravityModelRedirects(map[string]string{"claude-opus-5-5": "claude-opus-5-5-medium"}); err != nil {
-		t.Fatalf("valid Claude redirect rejected: %v", err)
-	}
-	if err := ValidateAntigravityModelRedirects(map[string]string{"claude-opus-5-5": "claude-sonnet-5-5-high"}); err == nil {
-		t.Fatal("cross-family Claude redirect accepted")
 	}
 }

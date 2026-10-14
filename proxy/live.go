@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -12,19 +11,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+
 	"net/http"
-	"net/url"
-	"path"
+
 	"strings"
 	"time"
 
-	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy/liveattestation"
-	"github.com/gin-gonic/gin"
+
 	"github.com/google/uuid"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -97,19 +93,6 @@ func (e *liveAttestationError) Error() string {
 	return e.Reason
 }
 
-func liveAccountFilter(account *auth.Account) bool {
-	return account != nil && !account.IsRelayStyle()
-}
-
-func isLiveModelName(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "gpt-live", "gpt-live-1", "gpt-live-1-mini":
-		return true
-	default:
-		return false
-	}
-}
-
 func liveModelExplicitlyDenied(id string, deny []string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	if id == "" {
@@ -128,268 +111,11 @@ func hashLiveCallID(callID string) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-func liveSessionModel(session json.RawMessage) string {
-	model := strings.TrimSpace(gjson.GetBytes(session, "model").String())
-	if model == "" {
-		return "gpt-live"
-	}
-	return model
-}
-
-func ValidateLiveCallRequest(request *liveCallRequest) error {
-	if request == nil || strings.TrimSpace(request.SDP) == "" {
-		return errors.New("sdp is required")
-	}
-	if len(request.Session) == 0 || !json.Valid(request.Session) {
-		return errors.New("session must be valid JSON")
-	}
-	var sessionObject map[string]json.RawMessage
-	if err := json.Unmarshal(request.Session, &sessionObject); err != nil || sessionObject == nil {
-		return errors.New("session must be a JSON object")
-	}
-	return nil
-}
-
-func liveCallIDFromLocation(location string) (string, error) {
-	location = strings.TrimSpace(location)
-	if location == "" {
-		return "", errors.New("live upstream response has no Location")
-	}
-	parsed, err := url.Parse(location)
-	if err != nil {
-		return "", fmt.Errorf("parse live Location: %w", err)
-	}
-	callID := strings.TrimSpace(path.Base(strings.TrimSuffix(parsed.Path, "/")))
-	if callID == "" || callID == "." || callID == "codex" {
-		return "", errors.New("live upstream Location has no call id")
-	}
-	return callID, nil
-}
-
-func liveSidebandLocation(fullPath, callID string) string {
-	prefix := "/v1/live/"
-	if strings.HasPrefix(fullPath, "/backend-api/codex/") {
-		prefix = "/backend-api/codex/"
-	}
-	return prefix + url.PathEscape(callID)
-}
-
-func liveRequireAllowLive(c *gin.Context) bool {
-	row := apiKeyRowFromContext(c)
-	if row != nil && row.Limits.AllowLive {
-		return true
-	}
-	api.SendErrorWithStatus(c, api.NewAPIError(
-		api.ErrCodeInsufficientScope,
-		"ChatGPT Live is not enabled for this API key",
-		api.ErrorTypePermission,
-	), http.StatusForbidden)
-	return false
-}
-
-func parseLiveCallRequest(c *gin.Context) (*liveCallRequest, error) {
-	contentType := strings.ToLower(c.GetHeader("Content-Type"))
-	if strings.HasPrefix(contentType, "multipart/form-data") {
-		request := &liveCallRequest{
-			SDP:     c.PostForm("sdp"),
-			Session: json.RawMessage(c.PostForm("session")),
-		}
-		if err := ValidateLiveCallRequest(request); err != nil {
-			return nil, err
-		}
-		return request, nil
-	}
-	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, liveUpstreamBodyLimit+1))
-	if err != nil {
-		return nil, errors.New("failed to read request body")
-	}
-	if len(raw) > liveUpstreamBodyLimit {
-		return nil, errors.New("request body is too large")
-	}
-	var request liveCallRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
-		return nil, errors.New("request body must be valid JSON")
-	}
-	if err := ValidateLiveCallRequest(&request); err != nil {
-		return nil, err
-	}
-	return &request, nil
-}
-
 // LiveCreate 处理 POST /v1/live 与 Codex realtime/calls。
-func (h *Handler) LiveCreate(c *gin.Context) {
-	if !liveRequireAllowLive(c) {
-		return
-	}
-	request, err := parseLiveCallRequest(c)
-	if err != nil {
-		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, err.Error(), api.ErrorTypeInvalidRequest))
-		return
-	}
-	if h.enforceAPIKeyLimitsAndReply(c, "") {
-		return
-	}
-	releaseKey, ok := h.acquireAPIKeyConcurrency(c)
-	if !ok {
-		return
-	}
-	holdKey := false
-	defer func() {
-		if !holdKey && releaseKey != nil {
-			releaseKey()
-		}
-	}()
-
-	attestation, ciphertext, err := h.prepareLiveAttestation(c.Request.Context(), c.GetHeader(liveAttestationHeader))
-	if err != nil {
-		var attErr *liveAttestationError
-		if errors.As(err, &attErr) {
-			api.SendErrorWithStatus(c, api.NewAPIError(api.ErrCodeServiceUnavailable, attErr.Error(), api.ErrorTypeServer), http.StatusServiceUnavailable)
-			return
-		}
-		api.SendErrorWithStatus(c, api.NewAPIError(api.ErrCodeServiceUnavailable, err.Error(), api.ErrorTypeServer), http.StatusServiceUnavailable)
-		return
-	}
-
-	apiKeyID := requestAPIKeyID(c)
-	apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
-	filter := applyAffinityGroupRouting(c, resolveRequestSessionIdentity(c.Request.Header, request.Session), liveAccountFilter)
-	excluded := map[int64]bool{}
-	var lastStatus int
-	var lastBody []byte
-	var lastContentType string
-	for attempt := 0; attempt <= 3; attempt++ {
-		account := h.store.NextExcludingWithFilter(apiKeyID, excluded, filter)
-		if account == nil {
-			if lastStatus != 0 {
-				if lastContentType == "" {
-					lastContentType = "application/json"
-				}
-				c.Data(lastStatus, lastContentType, lastBody)
-				return
-			}
-			api.SendError(c, api.ErrServiceUnavailable)
-			return
-		}
-
-		created, status, contentType, body, createErr := h.createUpstreamLiveCall(c.Request.Context(), account, request, attestation, c.Request.Header, apiKey)
-		if createErr != nil || created == nil {
-			excluded[account.ID()] = true
-			h.store.Release(account)
-			if status >= 400 && status < 500 && status != http.StatusTooManyRequests {
-				if contentType == "" {
-					contentType = "application/json"
-				}
-				c.Data(status, contentType, body)
-				return
-			}
-			if status != 0 {
-				lastStatus, lastBody, lastContentType = status, body, contentType
-			}
-			continue
-		}
-
-		now := time.Now()
-		trace := snapshotUpstreamTrace(c.Request.Context())
-		record := &liveCallRecord{
-			RequestID:             trace.RequestID,
-			UpstreamRequestID:     trace.UpstreamRequestID,
-			UpstreamProxyID:       trace.Proxy.ID,
-			UpstreamProxyName:     trace.Proxy.Name,
-			CallID:                created.callID,
-			CallHash:              hashLiveCallID(created.callID),
-			AccountID:             account.ID(),
-			APIKeyID:              apiKeyID,
-			LeaseID:               uuid.NewString(),
-			Model:                 liveSessionModel(request.Session),
-			CreatedAt:             now,
-			ExpiresAt:             now.Add(liveMaxSessionDuration),
-			Controller:            liveControllerPending,
-			AttestationCiphertext: ciphertext,
-			UserAgent:             c.GetHeader("User-Agent"),
-			ClientIP:              c.ClientIP(),
-			InboundEndpoint:       liveInboundEndpoint(c),
-		}
-		if err := h.liveCalls().save(c.Request.Context(), record, account, releaseKey); err != nil {
-			h.store.Release(account)
-			log.Printf("live: save call mapping: %v", err)
-			api.SendErrorWithStatus(c, api.NewAPIError(api.ErrCodeServiceUnavailable, "Live call mapping unavailable", api.ErrorTypeServer), http.StatusServiceUnavailable)
-			return
-		}
-		holdKey = true
-		c.Header("Location", liveSidebandLocation(c.FullPath(), created.callID))
-		c.Data(http.StatusOK, "application/sdp", created.sdp)
-		return
-	}
-	if lastStatus != 0 {
-		if lastContentType == "" {
-			lastContentType = "application/json"
-		}
-		c.Data(lastStatus, lastContentType, lastBody)
-		return
-	}
-	api.SendError(c, api.ErrServiceUnavailable)
-}
 
 type liveCallCreated struct {
 	sdp    []byte
 	callID string
-}
-
-func (h *Handler) createUpstreamLiveCall(
-	ctx context.Context,
-	account *auth.Account,
-	request *liveCallRequest,
-	attestation string,
-	downstream http.Header,
-	apiKey string,
-) (*liveCallCreated, int, string, []byte, error) {
-	body, err := json.Marshal(struct {
-		SDP     string          `json:"sdp"`
-		Session json.RawMessage `json:"session"`
-	}{SDP: request.SDP, Session: request.Session})
-	if err != nil {
-		return nil, 0, "", nil, err
-	}
-	endpoint := chatGPTLiveCallsURL
-	if liveCallsURLForTest != "" {
-		endpoint = liveCallsURLForTest
-	}
-	reqCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, 0, "", nil, err
-	}
-	if err := h.applyLiveUpstreamHeaders(req, account, attestation, downstream, apiKey); err != nil {
-		return nil, StatusCodeFromError(err), "", nil, err
-	}
-
-	proxyURL := ""
-	if h.store != nil {
-		proxyURL = h.store.ResolveProxyForAccount(account)
-	}
-	resp, err := getCodexMaintenanceClient(account, proxyURL).Do(req)
-	if err != nil {
-		return nil, 0, "", nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, liveUpstreamBodyLimit+1))
-	if err != nil {
-		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), nil, err
-	}
-	if len(responseBody) > liveUpstreamBodyLimit {
-		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), nil, errors.New("live upstream response is too large")
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("live: upstream create %d: %s", resp.StatusCode, truncateForLog(responseBody, 512))
-		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), responseBody, fmt.Errorf("live upstream status %d", resp.StatusCode)
-	}
-	callID, err := liveCallIDFromLocation(resp.Header.Get("Location"))
-	if err != nil {
-		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), responseBody, err
-	}
-	return &liveCallCreated{sdp: responseBody, callID: callID}, resp.StatusCode, resp.Header.Get("Content-Type"), responseBody, nil
 }
 
 func (h *Handler) applyLiveUpstreamHeaders(req *http.Request, account *auth.Account, attestation string, downstream http.Header, apiKey string) error {
@@ -438,26 +164,6 @@ func (h *Handler) applyLiveUpstreamHeaders(req *http.Request, account *auth.Acco
 	return nil
 }
 
-func (h *Handler) prepareLiveAttestation(ctx context.Context, clientHeader string) (string, string, error) {
-	header := strings.TrimSpace(clientHeader)
-	if header == "" {
-		generated, err := generateLiveAttestation(ctx)
-		if err != nil || strings.TrimSpace(generated) == "" {
-			reason := liveAttestationUnavailableMessage
-			if err != nil && !errors.Is(err, liveattestation.ErrUnsupportedPlatform) && !errors.Is(err, liveattestation.ErrChatGPTAppMissing) {
-				reason = "ChatGPT Live attestation is unavailable: " + err.Error()
-			}
-			return "", "", &liveAttestationError{Reason: reason}
-		}
-		header = strings.TrimSpace(generated)
-	}
-	ciphertext, err := encryptLiveAttestation(header, h.liveAttestationSecret())
-	if err != nil {
-		return "", "", &liveAttestationError{Reason: "failed to protect the Live attestation"}
-	}
-	return header, ciphertext, nil
-}
-
 func (h *Handler) decryptLiveAttestation(record *liveCallRecord) (string, error) {
 	if record == nil || strings.TrimSpace(record.AttestationCiphertext) == "" {
 		return "", &liveAttestationError{Reason: "the Live call has no reusable attestation"}
@@ -474,19 +180,6 @@ func (h *Handler) liveAttestationSecret() string {
 		return strings.TrimSpace(h.cfg.AdminSecret)
 	}
 	return ""
-}
-
-func liveInboundEndpoint(c *gin.Context) string {
-	if c == nil {
-		return "/v1/live"
-	}
-	if path := strings.TrimSpace(c.FullPath()); path != "" {
-		return path
-	}
-	if c.Request != nil {
-		return c.Request.URL.Path
-	}
-	return "/v1/live"
 }
 
 func liveAttestationKey(secret string) [32]byte {

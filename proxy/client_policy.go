@@ -52,15 +52,6 @@ func MatchBlockedClientEntry(entry ClientPolicyEntry, userAgent, originator stri
 	return false
 }
 
-func MatchBlockedClientEntries(entries []ClientPolicyEntry, userAgent, originator string) (ClientPolicyEntry, bool) {
-	for _, entry := range entries {
-		if MatchBlockedClientEntry(entry, userAgent, originator) {
-			return entry, true
-		}
-	}
-	return ClientPolicyEntry{}, false
-}
-
 func ParseClientPolicyEntries(raw string) ([]ClientPolicyEntry, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

@@ -474,21 +474,6 @@ func recordGrokRateLimitHeaders(account *auth.Account, header http.Header) {
 
 // sanitizeGrokRequestBody 剥离 Codex 管道注入的、Grok 上游不接受的字段。
 // prompt_cache_key 要留下：cli-chat-proxy 接受它，并用它做前缀缓存路由。
-func sanitizeGrokRequestBody(body []byte) []byte {
-	if !gjson.ValidBytes(body) {
-		return body
-	}
-	for _, path := range []string{"client_metadata", "service_tier", "safety_identifier"} {
-		if gjson.GetBytes(body, path).Exists() {
-			if updated, err := sjson.DeleteBytes(body, path); err == nil {
-				body = updated
-			}
-		}
-	}
-	body = clampGrokReasoningEffort(body)
-	body = dropGrokToolChoiceWithoutTools(body)
-	return body
-}
 
 // dropGrokToolChoiceWithoutTools 在没有工具声明时撤掉残留的 tool_choice。Grok 上游对
 // "设了 tool_choice 但 tools 为空" 硬校验（400 invalid-argument "A tool_choice was set on
@@ -496,20 +481,8 @@ func sanitizeGrokRequestBody(body []byte) []byte {
 // 两种来源都要兜住：客户端压缩轮自带 tools:[] + tool_choice:"auto"（issue #450），以及归一化
 // 把工具全剥空后残留的选择（如 external_web_access:false 丢弃唯一的 web_search 工具）。
 // 没有工具时 tool_choice 本就无意义，删除对语义无损。
-func dropGrokToolChoiceWithoutTools(body []byte) []byte {
-	if !gjson.GetBytes(body, "tool_choice").Exists() {
-		return body
-	}
-	// 仅在 tools 缺失或为空数组时动手：非数组形态属于畸形请求，保持原样交给上游报错。
-	tools := gjson.GetBytes(body, "tools")
-	if tools.Exists() && (!tools.IsArray() || len(tools.Array()) > 0) {
-		return body
-	}
-	if updated, err := sjson.DeleteBytes(body, "tool_choice"); err == nil {
-		return updated
-	}
-	return body
-}
+
+// 仅在 tools 缺失或为空数组时动手：非数组形态属于畸形请求，保持原样交给上游报错。
 
 // mapGrokReasoningEffort 把思考强度映射到当前 Grok 模型支持的档位。
 // menu 非空时以该账号 /v1/models 菜单为准：菜单里有的档原样转发，
@@ -600,9 +573,6 @@ func grokSupportsXHighReasoningEffort(model string) bool {
 // clampGrokReasoningEffort 规范化发给 Grok 上游的思考强度：同时覆盖 Responses
 // （reasoning.effort）与 Chat（reasoning_effort）两种形态，避免旧 Grok 不认的档位报错。
 // 没有目录菜单时使用版本启发式。
-func clampGrokReasoningEffort(body []byte) []byte {
-	return clampGrokReasoningEffortWithMenu(body, nil)
-}
 
 func clampGrokReasoningEffortWithMenu(body []byte, menu []string) []byte {
 	model := gjson.GetBytes(body, "model").String()
@@ -648,24 +618,11 @@ func relayUpstreamEndpointForAccount(account *auth.Account) string {
 // 条目兼容字符串与对象两种形态、data/models 两种容器（与 Grok CLI 目录响应一致）。
 // proxyURL 由调用方解析(建议 store.ResolveProxyForAccount,与主请求路径同一套
 // 三级回退),避免未绑定代理的账号在探测时直连同一出口 IP。
-func FetchGrokModelIDs(ctx context.Context, account *auth.Account, proxyURL string) ([]string, error) {
-	catalog, err := FetchGrokModelCatalog(ctx, account, proxyURL, "")
-	if err != nil {
-		return nil, err
-	}
-	models := VisibleGrokModelIDs(catalog.Models, account.GrokAuthKind())
-	// A successful empty catalog is authoritative and must close routing rather
-	// than being mistaken for "not yet synced" and reopening built-in defaults.
-	// Temporary account probes are safe; persisted accounts will subsequently
-	// publish the same fenced snapshot from the database.
-	account.SetGrokRoutingState(auth.GrokRoutingState{
-		CatalogKnown: true,
-		Models:       grokCatalogToRoutingModels(catalog.Models),
-		ObservedAt:   catalog.ObservedAt,
-		ExpiresAt:    catalog.ObservedAt.Add(5 * time.Minute),
-	})
-	return models, nil
-}
+
+// A successful empty catalog is authoritative and must close routing rather
+// than being mistaken for "not yet synced" and reopening built-in defaults.
+// Temporary account probes are safe; persisted accounts will subsequently
+// publish the same fenced snapshot from the database.
 
 // ==================== 错误分类与冷却映射 ====================
 

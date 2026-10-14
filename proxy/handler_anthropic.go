@@ -252,9 +252,6 @@ func (h *Handler) applyMessagesModelMapping(codexBody []byte, supportedModels []
 // hasNativeClaudeAccountForRequest，它会额外应用 API Key 的渠道、分组、套餐和
 // 账号可用性边界，避免一个全局存在但当前 Key 不可用的 Claude 账号把请求锁死
 // 在原生路径上。
-func (h *Handler) hasNativeClaudeAccountForModel(model string) bool {
-	return h.hasNativeClaudeAccountForRequest(nil, model)
-}
 
 // hasNativeClaudeAccountForRequest 判断当前请求是否真的有可调度的 Claude
 // 原生账号。Claude 模型优先原生，但只有在当前 API Key 能看到至少一个健康

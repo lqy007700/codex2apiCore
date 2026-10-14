@@ -814,10 +814,6 @@ func recordResponseCacheLookup(owner string, result responseCacheLookupResult) {
 	respCache.mu.Unlock()
 }
 
-func lookupResponseCacheResult(owner, responseID string) responseCacheLookupResult {
-	return lookupResponseCacheResultWithOwnership(owner, responseID, false)
-}
-
 func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow bool) responseCacheLookupResult {
 	storeKey := responseCacheStoreKey(owner, responseID)
 	respCache.mu.Lock()

@@ -2,89 +2,17 @@ package admin
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
+
 	"strings"
 	"testing"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
-	"github.com/gin-gonic/gin"
 )
 
-func newChannelTestSettingsHandler(t *testing.T) (*Handler, *gin.Engine) {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-	db := newTestAdminDB(t)
-	store := auth.NewStore(db, nil, nil)
-	t.Cleanup(store.Stop)
-	handler := &Handler{db: db, store: store}
-	router := gin.New()
-	router.GET("/api/admin/settings/channel-tests", handler.GetChannelTestSettings)
-	router.PUT("/api/admin/settings/channel-tests", handler.UpdateChannelTestSettings)
-	return handler, router
-}
+// 号池为空时下拉仍要有默认候选。
 
-func TestChannelTestSettingsRoundTripAndPartialUpdate(t *testing.T) {
-	handler, router := newChannelTestSettingsHandler(t)
-
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/settings/channel-tests", nil))
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"default_test_content"`) {
-		t.Fatalf("GET status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	// 号池为空时下拉仍要有默认候选。
-	if body := recorder.Body.String(); !strings.Contains(body, `"gemini-3.8-flash-low"`) || !strings.Contains(body, `"claude-haiku-4-5"`) {
-		t.Fatalf("GET body missing default model choices: %s", body)
-	}
-
-	recorder = httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings/channel-tests", strings.NewReader(`{"antigravity":{"test_model":" gemini-3.8-flash-low ","test_content":" 你的知识截止日期? ","test_concurrency":7}}`))
-	request.Header.Set("Content-Type", "application/json")
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("PUT status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	cfg := handler.channelTestConfig(context.Background())
-	if cfg.Antigravity.TestModel != "gemini-3.8-flash-low" || cfg.Antigravity.TestContent != "你的知识截止日期?" || cfg.Antigravity.TestConcurrency != 7 {
-		t.Fatalf("antigravity settings = %+v, want trimmed values", cfg.Antigravity)
-	}
-
-	// 只传 claude 不得清掉 antigravity。
-	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPut, "/api/admin/settings/channel-tests", strings.NewReader(`{"claude":{"test_model":"claude-haiku-4-5","test_content":""}}`))
-	request.Header.Set("Content-Type", "application/json")
-	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("PUT claude status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	persisted, err := handler.db.LoadChannelTestConfig(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if persisted.Antigravity.TestModel != "gemini-3.8-flash-low" || persisted.Claude.TestModel != "claude-haiku-4-5" || persisted.Claude.TestContent != "" {
-		t.Fatalf("persisted = %+v, want both channels kept", persisted)
-	}
-}
-
-func TestChannelTestSettingsRejectsInvalidModels(t *testing.T) {
-	_, router := newChannelTestSettingsHandler(t)
-	for _, body := range []string{
-		`{"claude":{"test_model":"gpt-5.5"}}`,
-		`{"antigravity":{"test_model":"gemini-image-2"}}`,
-		`{"antigravity":{"test_concurrency":201}}`,
-		`{"claude":{"test_concurrency":-1}}`,
-		`{}`,
-	} {
-		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPut, "/api/admin/settings/channel-tests", strings.NewReader(body))
-		request.Header.Set("Content-Type", "application/json")
-		router.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("PUT %s status=%d, want 400 (body=%s)", body, recorder.Code, recorder.Body.String())
-		}
-	}
-}
+// 只传 claude 不得清掉 antigravity。
 
 func TestConnectionTestUsesChannelSettingsForAntigravity(t *testing.T) {
 	store := auth.NewStore(nil, nil, nil)

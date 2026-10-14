@@ -445,19 +445,6 @@ func anyToFloat64(v any) *float64 {
 	}
 }
 
-func parseGrokTime(raw string) time.Time {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return time.Time{}
-	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		if t, err := time.Parse(layout, raw); err == nil {
-			return t
-		}
-	}
-	return time.Time{}
-}
-
 func truncateRunes(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s

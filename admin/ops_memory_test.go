@@ -78,15 +78,3 @@ func TestCollectOpsMemoryContainerFields(t *testing.T) {
 		t.Fatalf("container fallback = %+v", fallback)
 	}
 }
-
-func TestReadProcessMemoryReturnsValue(t *testing.T) {
-	got := readProcessMemory()
-	if got == 0 {
-		t.Fatal("readProcessMemory returned 0")
-	}
-	if runtime.GOOS == "linux" {
-		if rss, ok := parseLinuxProcessRSS(strings.NewReader("VmRSS:\t1 kB\n")); !ok || rss != 1024 {
-			t.Fatalf("Linux VmRSS parser sanity check = (%d, %t)", rss, ok)
-		}
-	}
-}

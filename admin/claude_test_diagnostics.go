@@ -61,16 +61,8 @@ type claudeTestCapture struct {
 	truncated bool
 }
 
-func (b *claudeTestCapture) Write(p []byte) (int, error) {
-	n := len(p)
-	remaining := max(0, b.limit-b.Len())
-	if len(p) > remaining {
-		b.truncated = true
-		p = p[:remaining]
-	}
-	_, _ = b.Buffer.Write(p) // bytes.Buffer.Write cannot fail.
-	return n, nil            // Never truncate the stream consumed by the existing parser.
-}
+// bytes.Buffer.Write cannot fail.
+// Never truncate the stream consumed by the existing parser.
 
 var claudeTestProxyCredentials = regexp.MustCompile(`(?i)((?:https?|socks5h?)://)[^\s/]+@`)
 

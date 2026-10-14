@@ -441,15 +441,6 @@ func removeInt64(slice []int64, target int64) []int64 {
 	return out
 }
 
-func containsInt64(slice []int64, target int64) bool {
-	for _, v := range slice {
-		if v == target {
-			return true
-		}
-	}
-	return false
-}
-
 func dedupeInt64(ids []int64) []int64 {
 	if len(ids) == 0 {
 		return nil

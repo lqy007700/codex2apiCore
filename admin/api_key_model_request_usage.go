@@ -1,17 +1,11 @@
 package admin
 
 import (
-	"context"
-	"database/sql"
-	"errors"
 	"fmt"
-	"net/http"
-	"strconv"
+
 	"strings"
-	"time"
 
 	"github.com/codex2api/database"
-	"github.com/gin-gonic/gin"
 )
 
 // Rule IDs identify persistent counters. Allowing a schedule or pattern to change
@@ -46,34 +40,3 @@ func normalizeAdminAPIKeyModelRequestLimits(in, existing []database.APIKeyModelR
 
 // GetAPIKeyModelRequestUsage reads the same durable counters used at dispatch.
 // GET /api/admin/keys/:id/model-request-usage
-func (h *Handler) GetAPIKeyModelRequestUsage(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeError(c, http.StatusBadRequest, "无效的 API Key ID")
-		return
-	}
-	if h == nil || h.db == nil {
-		writeError(c, http.StatusServiceUnavailable, "服务未就绪")
-		return
-	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
-	defer cancel()
-	row, err := h.db.GetAPIKeyByID(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && row == nil) {
-		writeError(c, http.StatusNotFound, "API Key 不存在")
-		return
-	}
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	usage, err := h.db.GetAPIKeyModelRequestUsage(ctx, id, row.Limits.ModelRequestLimits, time.Now())
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if usage == nil {
-		usage = []database.APIKeyModelRequestUsage{}
-	}
-	c.JSON(http.StatusOK, gin.H{"model_request_usage": usage})
-}

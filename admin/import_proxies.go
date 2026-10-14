@@ -2,7 +2,7 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
+
 	"fmt"
 	"log"
 	"strings"
@@ -160,14 +160,6 @@ func (h *Handler) registerImportedProxyBindings(ctx context.Context, bindings []
 // 必须带上回收站账号：导入命中既有身份时，对方十有八九正躺在回收站（删过的号重新
 // 导入走的就是这条合并/复活路径），用不含已删除行的查询会一律读不到，
 // 于是既有绑定判不出来、空绑定也永远填不上文件里的代理。
-func (h *Handler) accountHasProxyBinding(ctx context.Context, accountID int64) bool {
-	row, err := h.db.GetAccountByIDIncludingDeleted(ctx, accountID)
-	if err != nil {
-		log.Printf("导入代理: 读取账号 %d 现有代理失败，按已绑定处理: %v", accountID, err)
-		return true
-	}
-	return row != nil && strings.TrimSpace(row.ProxyURL) != ""
-}
 
 // grokFileProxyBinding 从一份 Grok 凭据文件里取出代理三件套。
 //
@@ -175,40 +167,6 @@ func (h *Handler) accountHasProxyBinding(ctx context.Context, accountID int64) b
 // 扫一遍原始 JSON。代理写在顶层（本仓库导出的形态），tokens 包装形态则下探一层。
 // 解析失败一律当作"没带代理"：文件本身是否合法由 ParseGrokAuthJSON 判定并报错，
 // 这里再报一次只会把错误信息搅乱。
-func grokFileProxyBinding(content string) importProxyBinding {
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(content), &root); err != nil || root == nil {
-		return importProxyBinding{}
-	}
-	if binding := grokProxyBindingFromNode(root); binding.url != "" {
-		return binding
-	}
-	var nested map[string]json.RawMessage
-	if raw, ok := root["tokens"]; ok && json.Unmarshal(raw, &nested) == nil {
-		return grokProxyBindingFromNode(nested)
-	}
-	return importProxyBinding{}
-}
-
-func grokProxyBindingFromNode(node map[string]json.RawMessage) importProxyBinding {
-	var binding importProxyBinding
-	if raw, ok := node["proxy_url"]; ok {
-		var url string
-		if json.Unmarshal(raw, &url) == nil {
-			binding.url = strings.TrimSpace(url)
-		}
-	}
-	if binding.url == "" {
-		return importProxyBinding{}
-	}
-	if raw, ok := node["proxy_enabled"]; ok {
-		var enabled bool
-		if json.Unmarshal(raw, &enabled) == nil {
-			binding.enabled = &enabled
-		}
-	}
-	return binding
-}
 
 // countDisabledAtSource 统计源端标记为禁用的代理条数。这些代理一律以启用态
 // 导入：照搬禁用状态会让绑定它们的账号立刻 fail-closed，用户看到的是"导入成功

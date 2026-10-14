@@ -43,11 +43,6 @@ var whamDailyUsageURLForTest = ""
 
 // SetWhamDailyUsageURLForTest 供测试替换按天用量端点 URL，返回恢复函数。
 // 生产代码不要调用。
-func SetWhamDailyUsageURLForTest(u string) (restore func()) {
-	old := whamDailyUsageURLForTest
-	whamDailyUsageURLForTest = u
-	return func() { whamDailyUsageURLForTest = old }
-}
 
 // WhamDailyUsageResponse 是 daily-workspace-usage-counts 的响应结构。
 type WhamDailyUsageResponse struct {

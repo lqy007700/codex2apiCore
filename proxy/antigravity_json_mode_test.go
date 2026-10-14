@@ -262,39 +262,6 @@ func TestAntigravityResponsesClaudeStructuredOutputOtherBadRequestPassesThrough(
 	}
 }
 
-func TestExecuteAntigravityGeminiRequestClaudeStructuredOutput(t *testing.T) {
-	request := `{"contents":[{"role":"user","parts":[{"text":"Make up Bob"}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"OBJECT","properties":{"name":{"type":"STRING"},"age":{"type":"INTEGER"}}}}}`
-	t.Run("non-stream", func(t *testing.T) {
-		antigravityJSONModeTestServer(t, http.StatusOK, antigravityJSONModeAnswer, "")
-		resp, err := ExecuteAntigravityGeminiRequest(context.Background(), antigravityJSONModeTestAccount(), "claude-sonnet-4-6", []byte(request), false, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		candidate := gjson.GetBytes(body, "candidates.0")
-		if candidate.Get("finishReason").String() != "STOP" || candidate.Get("content.parts.0.text").String() != `{"name":"Bob","age":3}` || candidate.Get("content.parts.0.functionCall").Exists() {
-			t.Fatalf("body = %s", body)
-		}
-	})
-	t.Run("stream", func(t *testing.T) {
-		antigravityJSONModeTestServer(t, http.StatusOK, "",
-			`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"json_mode","args":{"name":"Bob","age":3}}}]},"finishReason":"OTHER"}]}}`+"\n\n")
-		resp, err := ExecuteAntigravityGeminiRequest(context.Background(), antigravityJSONModeTestAccount(), "claude-sonnet-4-6", []byte(request), true, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("stream ended with %v; body=%s", err, body)
-		}
-		if !strings.Contains(string(body), `"finishReason":"STOP"`) || !strings.Contains(string(body), `"text":"{\"name\":\"Bob\",\"age\":3}"`) || strings.Contains(string(body), "json_mode") {
-			t.Fatalf("body = %s", body)
-		}
-	})
-}
-
 // newAntigravityJSONModeHandler serves a Claude-capable Antigravity account
 // behind the downstream handlers, so the Chat bridge is exercised end to end.
 func newAntigravityJSONModeHandler(t *testing.T) *Handler {

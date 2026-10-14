@@ -100,10 +100,6 @@ type apiKeyCountRuntimeRecord struct {
 	Count int `json:"count"`
 }
 
-func (h *Handler) nextAccountForSession(sessionID string, apiKeyID int64, exclude map[int64]bool) (*auth.Account, string) {
-	return h.nextAccountForSessionWithFilter(sessionID, apiKeyID, exclude, nil)
-}
-
 func (h *Handler) nextAccountForSessionWithFilter(sessionID string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter) (*auth.Account, string) {
 	return h.nextAccountForSessionWithDispatch(sessionID, apiKeyID, exclude, filter, auth.DispatchPolicyStandard)
 }
@@ -1095,9 +1091,6 @@ func continuousRetryProtocolForGrok(protocol GrokProtocol) continuousRetryHTTPPr
 // id, retry, comments, multiline data, line endings, and [DONE]); their data
 // projection is inspected only for terminal state, usage, and the pre-output
 // retry boundary. firstTokenMs is measured from startedAt.
-func forwardGrokNativeResponse(c *gin.Context, resp *http.Response, protocol GrokProtocol, streaming bool, startedAt time.Time, firstVisible func()) (*UsageInfo, streamOutcome, bool, int) {
-	return forwardGrokNativeResponseTo(c.Request.Context(), c, resp, protocol, streaming, startedAt, firstVisible, nil, nil)
-}
 
 func forwardGrokNativeResponseTo(readCtx context.Context, c *gin.Context, resp *http.Response, protocol GrokProtocol, streaming bool, startedAt time.Time, firstVisible func(), output io.Writer, outputFlusher http.Flusher) (*UsageInfo, streamOutcome, bool, int) {
 	return forwardGrokNativeResponseObserved(readCtx, c, resp, protocol, streaming, startedAt, firstVisible, output, outputFlusher, nil)
@@ -1270,9 +1263,6 @@ func holdGrokNativePreOutput(protocol GrokProtocol, frame rawGrokSSEFrame, alrea
 // GrokStreamEventIsVisible reports whether a native Grok SSE payload carries
 // model output the client can see. Capability probes reuse this so usage_logs
 // first_token_ms is not left at 0 for otherwise successful streams.
-func GrokStreamEventIsVisible(protocol GrokProtocol, payload []byte) bool {
-	return grokNativeVisibleEvent(protocol, payload)
-}
 
 func grokNativeVisibleEvent(protocol GrokProtocol, payload []byte) bool {
 	root := gjson.ParseBytes(payload)
@@ -1333,9 +1323,6 @@ func (h *Handler) SetRuntimeCache(tc cache.TokenCache) {
 }
 
 // NewHandlerWithDeviceProfile 创建处理器（带设备指纹配置）
-func NewHandlerWithDeviceProfile(store *auth.Store, db *database.DB, deviceCfg *DeviceProfileConfig) *Handler {
-	return NewHandler(store, db, nil, deviceCfg)
-}
 
 // resolveAPIKey 解析下游 API Key。返回值区分三种结果：
 //   - (row, true, nil)：命中有效 key
@@ -1446,16 +1433,8 @@ func (h *Handler) syncAPIKeyAllowedGroups(row *database.APIKeyRow) {
 }
 
 // isValidKey 检查 key 是否有效（配置文件 + DB）。DB 故障时保守返回 false。
-func (h *Handler) isValidKey(key string) bool {
-	_, ok, _ := h.resolveAPIKey(key)
-	return ok
-}
 
 // hasAnyKeys 检查是否配置了任何密钥
-func (h *Handler) hasAnyKeys() bool {
-	configured, err := h.hasAnyKeysWithError()
-	return err == nil && configured
-}
 
 func (h *Handler) hasAnyKeysWithError() (bool, error) {
 	if len(h.configKeys) > 0 {
@@ -1937,15 +1916,6 @@ func (h *Handler) storeHasAvailableCodexAccount() bool {
 func excludeRelayAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
 	return func(account *auth.Account) bool {
 		if account == nil || account.IsRelayStyle() {
-			return false
-		}
-		return inner == nil || inner(account)
-	}
-}
-
-func excludeAntigravityAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
-	return func(account *auth.Account) bool {
-		if account == nil || account.IsAntigravityAPI() {
 			return false
 		}
 		return inner == nil || inner(account)
@@ -3125,82 +3095,27 @@ func appendMissingResponseImageOutputs(responseJSON []byte, imageOutputs []json.
 }
 
 // RegisterRoutes 注册路由
+// RegisterRoutes exposes the Codex account service to New API.
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	auth := h.authMiddleware()
-
-	// /v1 前缀路由（标准路径）
-	v1 := r.Group("/v1")
-	v1.Use(auth)
-	v1.POST("/prompt-filter/newapi/verify", h.VerifyNewAPIPolicyHandshake)
-	v1.POST("/chat/completions", h.ChatCompletions)
-	v1.POST("/responses", h.Responses)
-	v1.GET("/responses", h.ResponsesWebSocket)
-	v1.GET("/realtime", h.RealtimeWebSocket)
-	v1.POST("/responses/compact", h.ResponsesCompact)
-	v1.POST("/images/generations", h.ImagesGenerations)
-	v1.POST("/images/edits", h.ImagesEdits)
-	// Grok 生视频:异步任务创建 + 客户端轮询 + 产物代理下载
-	v1.POST("/videos/generations", h.VideosGenerations)
-	v1.POST("/videos/edits", h.VideosEdits)
-	v1.POST("/videos/extensions", h.VideosExtensions)
-	v1.GET("/videos/:request_id", h.VideosStatus)
-	v1.GET("/videos/:request_id/content", h.VideosContent)
-	v1.POST("/messages", h.Messages)
-	v1.POST("/messages/count_tokens", h.CountTokens)
-	v1.POST("/responses/input_tokens", h.ResponsesInputTokens)
-	// Codex CLI / Codex App 从 /models?client_version=... 刷新模型选单，期望
-	// manifest 格式；client_version 是 Codex 客户端的天然指纹，普通 OpenAI
-	// 客户端不携带，其余请求保持 OpenAI 格式列表不变。
-	v1.GET("/models", h.listModelsOrManifest)
-	// Codex CLI web_search = "live" 的 standalone 联网搜索端点 (issue #359)
-	v1.POST("/alpha/search", h.CodexAlphaSearchHandler)
-	v1.POST("/live", h.LiveCreate)
-	v1.GET("/live/:call_id", h.LiveSideband)
-
-	// 无前缀路由（兼容 base_url 已包含 /v1 的客户端）
-	r.POST("/chat/completions", auth, h.ChatCompletions)
-	r.POST("/responses", auth, h.Responses)
-	r.GET("/responses", auth, h.ResponsesWebSocket)
-	r.GET("/realtime", auth, h.RealtimeWebSocket)
-	r.POST("/responses/compact", auth, h.ResponsesCompact)
-	r.POST("/images/generations", auth, h.ImagesGenerations)
-	r.POST("/images/edits", auth, h.ImagesEdits)
-	r.POST("/videos/generations", auth, h.VideosGenerations)
-	r.POST("/videos/edits", auth, h.VideosEdits)
-	r.POST("/videos/extensions", auth, h.VideosExtensions)
-	r.GET("/videos/:request_id", auth, h.VideosStatus)
-	r.GET("/videos/:request_id/content", auth, h.VideosContent)
-	r.POST("/messages", auth, h.Messages)
-	r.POST("/messages/count_tokens", auth, h.CountTokens)
-	r.POST("/responses/input_tokens", auth, h.ResponsesInputTokens)
-	r.GET("/models", auth, h.listModelsOrManifest)
-	r.POST("/alpha/search", auth, h.CodexAlphaSearchHandler)
-	r.POST("/live", auth, h.LiveCreate)
-	r.GET("/live/:call_id", auth, h.LiveSideband)
-
-	codexDirect := r.Group("/backend-api/codex")
-	codexDirect.Use(auth)
-	codexDirect.POST("/responses", h.Responses)
-	codexDirect.GET("/responses", h.ResponsesWebSocket)
-	codexDirect.GET("/models", h.CodexModelsManifestHandler)
-	codexDirect.POST("/alpha/search", h.CodexAlphaSearchHandler)
-	codexDirect.POST("/realtime/calls", h.LiveCreate)
-	codexDirect.POST("/responses/*subpath", func(c *gin.Context) {
-		subpath := strings.TrimSpace(c.Param("subpath"))
-		if subpath == "/compact" || strings.HasPrefix(subpath, "/compact/") {
-			h.ResponsesCompact(c)
-			return
-		}
-		h.Responses(c)
-	})
-	codexDirect.GET("/:call_id", h.LiveSideband)
-
-	// Native Gemini API (Antigravity OAuth accounts only).
-	v1beta := r.Group("/v1beta")
-	v1beta.Use(auth)
-	v1beta.GET("/models", h.GeminiListModels)
-	v1beta.GET("/models/*action", h.GeminiGetModel)
-	v1beta.POST("/models/*action", h.GeminiModelsAction)
+	for _, prefix := range []string{"/v1", ""} {
+		group := r.Group(prefix)
+		group.Use(auth)
+		group.POST("/chat/completions", h.ChatCompletions)
+		group.POST("/responses", h.Responses)
+		group.GET("/responses", h.ResponsesWebSocket)
+		group.POST("/responses/compact", h.ResponsesCompact)
+		group.POST("/messages", h.Messages)
+		group.POST("/messages/count_tokens", h.CountTokens)
+		group.POST("/responses/input_tokens", h.ResponsesInputTokens)
+		group.GET("/models", h.listModelsOrManifest)
+	}
+	codex := r.Group("/backend-api/codex")
+	codex.Use(auth)
+	codex.POST("/responses", h.Responses)
+	codex.GET("/responses", h.ResponsesWebSocket)
+	codex.POST("/responses/compact", h.ResponsesCompact)
+	codex.GET("/models", h.CodexModelsManifestHandler)
 }
 
 // APIKeyAuthMiddleware exposes the standard /v1 API key authentication middleware
@@ -3211,9 +3126,6 @@ func (h *Handler) APIKeyAuthMiddleware() gin.HandlerFunc {
 
 // APIKeyReadAuthMiddleware permits exhausted keys to retrieve their own stored
 // results. All other authentication checks remain in force; writes stay blocked.
-func (h *Handler) APIKeyReadAuthMiddleware() gin.HandlerFunc {
-	return h.authMiddlewareWithQuotaRead(true)
-}
 
 // authMiddleware API Key 鉴权中间件（增强版，带安全日志）
 //
@@ -7866,73 +7778,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 }
 
 // handleStreamResponse 处理流式响应（翻译 Codex → OpenAI）
-func (h *Handler) handleStreamResponse(c *gin.Context, body io.Reader, model, chunkID string, created int64) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": gin.H{"message": "streaming not supported", "type": "server_error"},
-		})
-		return
-	}
-
-	streamWriter := h.newStreamFlushWriter(c, c.Writer, flusher)
-	err := ReadSSEStream(body, func(data []byte) bool {
-		translation := TranslateStreamChunkResult(data, model, chunkID, created)
-		if translation.Chunk != nil {
-			if err := streamWriter.WriteSSEData(translation.Chunk); err != nil {
-				return false
-			}
-		}
-		if translation.Terminal {
-			if !translation.Failed {
-				if err := streamWriter.WriteString("data: [DONE]\n\n"); err != nil {
-					return false
-				}
-			}
-			_ = streamWriter.Flush()
-			return false
-		}
-		return true
-	})
-	_ = streamWriter.Flush()
-
-	if err != nil {
-		log.Printf("读取上游流失败: %v", err)
-	}
-}
 
 // handleCompactResponse 处理非流式响应
-func (h *Handler) handleCompactResponse(c *gin.Context, body io.Reader, model, chunkID string, created int64) {
-	var fullContent strings.Builder
-	var fullReasoning strings.Builder
-	var usage *UsageInfo
-
-	_ = ReadSSEStream(body, func(data []byte) bool {
-		eventType := gjson.GetBytes(data, "type").String()
-		switch eventType {
-		case "response.output_text.delta":
-			delta := gjson.GetBytes(data, "delta").String()
-			fullContent.WriteString(delta)
-		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-			fullReasoning.WriteString(gjson.GetBytes(data, "delta").String())
-		case "response.completed":
-			usage = extractUsage(data)
-			return false
-		case "response.failed":
-			return false
-		}
-		return true
-	})
-
-	result := BuildCompactResponse(chunkID, model, created, fullContent.String(), fullReasoning.String(), nil, usage)
-
-	c.Data(http.StatusOK, "application/json", result)
-}
 
 // ==================== 通用辅助 ====================
 
@@ -8455,9 +8302,6 @@ func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, res
 }
 
 // applyCooldown 根据上游状态码设置智能冷却
-func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []byte, resp *http.Response) {
-	h.applyCooldownForModel(account, statusCode, body, resp, "")
-}
 
 func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, body []byte, resp *http.Response, model string) codex429Decision {
 	// Grok 上游的错误语义与 Codex 不同（免费额度耗尽/超支限制/Retry-After），单独映射。
@@ -8989,10 +8833,6 @@ func (h *Handler) sendFinalUpstreamError(c *gin.Context, statusCode int, body []
 }
 
 // handleUpstreamError 统一处理上游错误（兼容旧调用）
-func (h *Handler) handleUpstreamError(c *gin.Context, account *auth.Account, statusCode int, body []byte) {
-	h.applyCooldown(account, statusCode, body, nil)
-	h.sendUpstreamError(c, statusCode, body)
-}
 
 // ListModels 列出可用模型
 // listModelsOrManifest 按客户端形态分发模型列表：带 client_version 查询参数的是

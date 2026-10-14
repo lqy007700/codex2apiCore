@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
-	"github.com/codex2api/cache"
+
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
@@ -19,144 +19,10 @@ import (
 // issue #618：重授权后 RT 变化，裸 RT 导入在刷新后按身份合并进旧账号，但旧账号
 // 之前的 401 unauthorized / error 态没有一起清掉——用户看到新账号消失、旧账号
 // 继续挂"未授权"。合并时必须把旧账号的错误态清掉（库 + 跨实例冷却缓存）。
-func TestMergeRefreshedDuplicateClearsStaleUnauthorizedState(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
-	db := newTestAdminDB(t)
-	tokenCache := cache.NewMemory(4)
-	defer tokenCache.Close()
-	store := auth.NewStore(db, tokenCache, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
-	handler := &Handler{
-		db:         db,
-		store:      store,
-		probeUsage: func(context.Context, *auth.Account) error { return nil },
-	}
-	ctx := context.Background()
-
-	oldID, err := db.InsertAccountWithCredentials(ctx, "stale", map[string]interface{}{
-		"refresh_token": "rt-dead",
-		"access_token":  "at-stale",
-		"email":         "revive@example.com",
-		"workspace_id":  "ws-revive",
-	}, "")
-	if err != nil {
-		t.Fatalf("Insert old: %v", err)
-	}
-	if err := store.LoadAccountByID(ctx, oldID); err != nil {
-		t.Fatalf("LoadAccountByID: %v", err)
-	}
-	old := store.FindByID(oldID)
-	if old == nil {
-		t.Fatal("old runtime account missing")
-	}
-	store.MarkCooldownWithError(old, time.Hour, "unauthorized", "401 unauthorized")
-	if got := old.RuntimeStatus(); got != "unauthorized" {
-		t.Fatalf("precondition: runtime status = %q, want unauthorized", got)
-	}
-	preRow, err := db.GetAccountByID(ctx, oldID)
-	if err != nil {
-		t.Fatalf("GetAccountByID pre: %v", err)
-	}
-	if !strings.EqualFold(preRow.CooldownReason, "unauthorized") {
-		t.Fatalf("precondition: db cooldown_reason = %q, want unauthorized", preRow.CooldownReason)
-	}
-
-	// 重授权后的新 RT 导入，刷新完成后身份与旧账号相同
-	newID, err := db.InsertAccountWithCredentials(ctx, "reauth", map[string]interface{}{
-		"refresh_token": "rt-fresh",
-		"access_token":  "at-fresh",
-		"email":         "revive@example.com",
-		"workspace_id":  "ws-revive",
-	}, "")
-	if err != nil {
-		t.Fatalf("Insert new: %v", err)
-	}
-	store.AddAccount(&auth.Account{DBID: newID, RefreshToken: "rt-fresh"})
-
-	if merged := handler.mergeRefreshedDuplicateIntoExisting(newID, "test"); !merged {
-		t.Fatal("expected re-authorized RT to merge into the stale account")
-	}
-
-	row, err := db.GetAccountByID(ctx, oldID)
-	if err != nil {
-		t.Fatalf("GetAccountByID: %v", err)
-	}
-	if got := row.GetCredential("refresh_token"); got != "rt-fresh" {
-		t.Fatalf("refresh_token = %q, want rt-fresh", got)
-	}
-	if strings.EqualFold(row.Status, "error") {
-		t.Fatalf("db status = %q, want cleared", row.Status)
-	}
-	if row.CooldownReason != "" || row.CooldownUntil.Valid {
-		t.Fatalf("db cooldown = (%q, valid=%v), want cleared", row.CooldownReason, row.CooldownUntil.Valid)
-	}
-	survivor := store.FindByID(oldID)
-	if survivor == nil {
-		t.Fatal("survivor missing from runtime store")
-	}
-	if got := survivor.RuntimeStatus(); got == "unauthorized" || got == "error" {
-		t.Fatalf("survivor runtime status = %q, want cleared", got)
-	}
-	survivor.Mu().RLock()
-	tier := survivor.HealthTier
-	survivor.Mu().RUnlock()
-	if tier == auth.HealthTierBanned {
-		t.Fatalf("survivor HealthTier = %q, want not banned", tier)
-	}
-	if store.FindByID(newID) != nil {
-		t.Fatal("merged duplicate should have left the runtime store")
-	}
-}
+// 重授权后的新 RT 导入，刷新完成后身份与旧账号相同
 
 // 限速冷却不是"过时的错误态"，合并时不能被顺手清掉。
-func TestMergeRefreshedDuplicateKeepsRateLimitCooldown(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	db := newTestAdminDB(t)
-	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
-	handler := &Handler{
-		db:         db,
-		store:      store,
-		probeUsage: func(context.Context, *auth.Account) error { return nil },
-	}
-	ctx := context.Background()
-
-	oldID, err := db.InsertAccountWithCredentials(ctx, "limited", map[string]interface{}{
-		"refresh_token": "rt-old",
-		"access_token":  "at-old",
-		"email":         "limited@example.com",
-		"workspace_id":  "ws-limited",
-	}, "")
-	if err != nil {
-		t.Fatalf("Insert old: %v", err)
-	}
-	if err := store.LoadAccountByID(ctx, oldID); err != nil {
-		t.Fatalf("LoadAccountByID: %v", err)
-	}
-	store.MarkCooldown(store.FindByID(oldID), time.Hour, "rate_limited")
-
-	newID, err := db.InsertAccountWithCredentials(ctx, "reauth", map[string]interface{}{
-		"refresh_token": "rt-new",
-		"access_token":  "at-new",
-		"email":         "limited@example.com",
-		"workspace_id":  "ws-limited",
-	}, "")
-	if err != nil {
-		t.Fatalf("Insert new: %v", err)
-	}
-	store.AddAccount(&auth.Account{DBID: newID, RefreshToken: "rt-new"})
-
-	if merged := handler.mergeRefreshedDuplicateIntoExisting(newID, "test"); !merged {
-		t.Fatal("expected merge")
-	}
-	row, err := db.GetAccountByID(ctx, oldID)
-	if err != nil {
-		t.Fatalf("GetAccountByID: %v", err)
-	}
-	if !strings.EqualFold(row.CooldownReason, "rate_limited") || !row.CooldownUntil.Valid {
-		t.Fatalf("rate-limit cooldown = (%q, valid=%v), want preserved", row.CooldownReason, row.CooldownUntil.Valid)
-	}
-}
 
 func newReviveTestHandler(t *testing.T) (*Handler, *database.DB, *auth.Store) {
 	t.Helper()

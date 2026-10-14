@@ -348,9 +348,6 @@ func fromCodexCallID(codexID string) string {
 
 // TranslateAnthropicToCodex 将 Anthropic Messages 请求转换为 Codex Responses 格式
 // 返回: (codex 请求体, 原始 Anthropic model 名, error)
-func TranslateAnthropicToCodex(rawJSON []byte, modelMappingJSON string) ([]byte, string, error) {
-	return TranslateAnthropicToCodexWithModels(rawJSON, modelMappingJSON, SupportedModels)
-}
 
 func shouldUseCodexPriorityForAnthropicSpeed(speed string) bool {
 	return strings.ToLower(strings.TrimSpace(speed)) == "fast"

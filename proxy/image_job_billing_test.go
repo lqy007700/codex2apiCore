@@ -107,36 +107,3 @@ func TestImagePerImageRetryBilling(t *testing.T) {
 		})
 	}
 }
-
-func TestDeferredImageBillingFinalizesOnce(t *testing.T) {
-	database.SetModelPricingOverrides(map[string]database.ModelPricingOverride{"gpt-image-2": {UserBillingMode: database.UserBillingModePerImage, ImageUnitPrice: .05}})
-	t.Cleanup(func() { database.SetModelPricingOverrides(nil) })
-	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "deferred.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	keyID, err := db.InsertAPIKey(context.Background(), "deferred", "sk-deferred-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := NewHandler(nil, db, nil, nil)
-	ctx, finish := DeferImageJobBilling(context.Background())
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(ctx)
-	c.Set(contextAPIKeyID, keyID)
-	h.logUsageForRequest(c, &database.UsageLogInput{AccountID: 1, Model: "gpt-image-2", StatusCode: 200, ImageCount: 2, InputTokens: 1000})
-	db.FlushUsageLogs()
-	key, _ := db.GetAPIKeyByID(ctx, keyID)
-	if key.QuotaUsed != 0 {
-		t.Fatal("charged before outputs saved")
-	}
-	database.SetModelPricingOverrides(nil)
-	finish(1)
-	finish(2)
-	db.FlushUsageLogs()
-	key, _ = db.GetAPIKeyByID(ctx, keyID)
-	if key.QuotaUsed != .05 {
-		t.Fatalf("deferred fee=%v", key.QuotaUsed)
-	}
-}

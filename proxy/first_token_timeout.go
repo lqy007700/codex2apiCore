@@ -42,22 +42,8 @@ func (g *firstTokenTimeoutGuard) Stop() {
 	})
 }
 
-func (g *firstTokenTimeoutGuard) MarkEvent(eventType string) {
-	if g == nil || !isFirstTokenEvent(eventType) {
-		return
-	}
-	g.Stop()
-}
-
 func (g *firstTokenTimeoutGuard) MarkPayload(data []byte) {
 	if g == nil || !isFirstTokenPayload(data) {
-		return
-	}
-	g.Stop()
-}
-
-func (g *firstTokenTimeoutGuard) MarkFirstToken() {
-	if g == nil {
 		return
 	}
 	g.Stop()

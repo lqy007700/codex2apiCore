@@ -55,9 +55,6 @@ func apiKeyRowFromContext(c *gin.Context) *database.APIKeyRow {
 }
 
 // APIKeyRowFromContext returns the API key metadata stored by the /v1 auth middleware.
-func APIKeyRowFromContext(c *gin.Context) *database.APIKeyRow {
-	return apiKeyRowFromContext(c)
-}
 
 // payloadRuleIdentity 从鉴权 context 构造 payload 规则身份（供 api_key_*/group_* 匹配门与
 // service_tier 记账重算共用）。无鉴权身份时返回 nil（带身份门的规则将 fail-closed 不命中）。
@@ -84,36 +81,6 @@ func (h *Handler) EnforceAPIKeyLimits(c *gin.Context, model string) (int, string
 // verifies that a batched request cannot cross the RPM/RPD boundary by issuing
 // multiple upstream calls after a single admission check. Each upstream call
 // still runs the normal handler checks and records its own usage entry.
-func (h *Handler) EnforceAPIKeyLimitsForRequests(c *gin.Context, model string, requests int) (int, string) {
-	if status, msg := h.enforceAPIKeyLimits(c, model); status != 0 {
-		return status, msg
-	}
-	if requests <= 1 {
-		return 0, ""
-	}
-	row := apiKeyRowFromContext(c)
-	if row == nil || row.ID <= 0 {
-		return 0, ""
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-	defer cancel()
-	if row.Limits.RPM > 0 {
-		count, err := h.apiKeyWindowRequests(ctx, row.ID, "rpm", apiKeyRPMWindow)
-		if err == nil && apiKeyBatchWouldExceed(count, row.Limits.RPM, requests) {
-			return http.StatusTooManyRequests,
-				fmt.Sprintf("API key rate limit exceeded: batch of %d would exceed %d requests per minute", requests, row.Limits.RPM)
-		}
-	}
-	if row.Limits.RPD > 0 {
-		count, err := h.apiKeyWindowRequests(ctx, row.ID, "rpd", apiKeyRPDWindow)
-		if err == nil && apiKeyBatchWouldExceed(count, row.Limits.RPD, requests) {
-			return http.StatusTooManyRequests,
-				fmt.Sprintf("API key rate limit exceeded: batch of %d would exceed %d requests per day", requests, row.Limits.RPD)
-		}
-	}
-	return 0, ""
-}
 
 func apiKeyBatchWouldExceed(current int64, limit, requests int) bool {
 	return limit > 0 && requests > 0 && current+int64(requests) > int64(limit)

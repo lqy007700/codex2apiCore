@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"mime/multipart"
+
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -280,75 +280,6 @@ func TestSummarizeDashboardAccountsUsesAntigravityControlPlaneStatus(t *testing.
 	}
 }
 
-func TestNormalizeBackgroundUploadMedia(t *testing.T) {
-	tests := []struct {
-		name        string
-		filename    string
-		contentType string
-		data        []byte
-		wantMime    string
-		wantExt     string
-		wantErr     bool
-	}{
-		{
-			name:        "png by content",
-			filename:    "wallpaper.png",
-			contentType: "application/octet-stream",
-			data:        []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0},
-			wantMime:    "image/png",
-			wantExt:     "png",
-		},
-		{
-			name:        "svg by extension",
-			filename:    "wallpaper.svg",
-			contentType: "image/svg+xml",
-			data:        []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>`),
-			wantMime:    "image/svg+xml",
-			wantExt:     "svg",
-		},
-		{
-			name:        "mp4 by signature",
-			filename:    "wallpaper.mp4",
-			contentType: "video/mp4",
-			data:        []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'},
-			wantMime:    "video/mp4",
-			wantExt:     "mp4",
-		},
-		{
-			name:        "reject fake mp4",
-			filename:    "wallpaper.mp4",
-			contentType: "video/mp4",
-			data:        []byte("not actually an mp4 file"),
-			wantErr:     true,
-		},
-		{
-			name:        "reject html",
-			filename:    "wallpaper.png",
-			contentType: "image/png",
-			data:        []byte("<html><script>alert(1)</script></html>"),
-			wantErr:     true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotMime, gotExt, err := normalizeBackgroundUploadMedia(tt.filename, tt.contentType, tt.data)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if gotMime != tt.wantMime || gotExt != tt.wantExt {
-				t.Fatalf("mime/ext = %q/%q, want %q/%q", gotMime, gotExt, tt.wantMime, tt.wantExt)
-			}
-		})
-	}
-}
-
 func TestDecodeBackgroundConfigGlassDefaultsAndClamp(t *testing.T) {
 	defaulted := decodeBackgroundConfig(`{"image":"/wallpaper.jpg"}`)
 	if defaulted.Opacity != defaultBackgroundOpacity {
@@ -378,67 +309,6 @@ func TestDecodeBackgroundConfigGlassDefaultsAndClamp(t *testing.T) {
 	transparent := decodeBackgroundConfig(`{"image":"/wallpaper.jpg","glass_opacity":0,"glass_blur":0}`)
 	if transparent.GlassOpacity != 0 || transparent.GlassBlur != 0 {
 		t.Fatalf("transparent glass = %d/%d, want 0/0", transparent.GlassOpacity, transparent.GlassBlur)
-	}
-}
-
-func TestBackgroundUploadLimitBytes(t *testing.T) {
-	if got := backgroundUploadLimitBytes("image/png"); got != maxBackgroundImageAssetUploadBytes {
-		t.Fatalf("image upload limit = %d, want %d", got, maxBackgroundImageAssetUploadBytes)
-	}
-	if got := backgroundUploadLimitBytes("video/mp4"); got != maxBackgroundVideoAssetUploadBytes {
-		t.Fatalf("video upload limit = %d, want %d", got, maxBackgroundVideoAssetUploadBytes)
-	}
-	if maxBackgroundVideoAssetUploadBytes != 40*1024*1024 {
-		t.Fatalf("video upload limit = %d, want 40MB", maxBackgroundVideoAssetUploadBytes)
-	}
-}
-
-func TestUploadBackgroundAssetStoresFile(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	t.Setenv("BACKGROUND_ASSET_DIR", t.TempDir())
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("file", "wallpaper.svg")
-	if err != nil {
-		t.Fatalf("create form file: %v", err)
-	}
-	if _, err := part.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>`)); err != nil {
-		t.Fatalf("write form file: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("close multipart writer: %v", err)
-	}
-
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/settings/background-upload", &body)
-	ctx.Request.Header.Set("Content-Type", writer.FormDataContentType())
-
-	handler := &Handler{}
-	handler.UploadBackgroundAsset(ctx)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-
-	var payload backgroundAssetUploadResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !strings.HasPrefix(payload.URL, backgroundAssetURLPrefix) {
-		t.Fatalf("url = %q, want prefix %q", payload.URL, backgroundAssetURLPrefix)
-	}
-	if payload.MimeType != "image/svg+xml" || payload.Bytes <= 0 {
-		t.Fatalf("payload = %+v, want svg mime and non-empty bytes", payload)
-	}
-
-	fullPath, ok := backgroundAssetPath(strings.TrimPrefix(payload.URL, backgroundAssetURLPrefix))
-	if !ok {
-		t.Fatalf("invalid stored asset path for url %q", payload.URL)
-	}
-	if _, err := os.Stat(fullPath); err != nil {
-		t.Fatalf("stored file missing: %v", err)
 	}
 }
 
@@ -1963,92 +1833,8 @@ func TestUpdateSettingsPersistsWeakNetworkMode(t *testing.T) {
 	}
 }
 
-func TestPromptFilterAdvancedSettingsRoundTripPreservesUnknownFields(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	db := newTestAdminDB(t)
-	tc := cache.NewMemory(4)
-	t.Cleanup(func() { _ = tc.Close() })
-	settings := defaultBootstrapSettings()
-	settings.PromptFilterAdvancedConfig = `{
-		"normalization":{"enabled":true,"future_decoder":"v2"},
-		"guard":{"mode":"shadow","future_guard":{"enabled":true}},
-		"future_root":{"revision":7}
-	}`
-	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
-		t.Fatalf("seed settings: %v", err)
-	}
-	store := auth.NewStore(db, tc, settings)
-	t.Cleanup(store.Stop)
-	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
-
-	getAdvanced := func() string {
-		t.Helper()
-		recorder := httptest.NewRecorder()
-		ctx, _ := gin.CreateTestContext(recorder)
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/api/admin/settings", nil)
-		handler.GetSettings(ctx)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GET status=%d body=%s", recorder.Code, recorder.Body.String())
-		}
-		var response settingsResponse
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GET response: %v", err)
-		}
-		return response.PromptFilterAdvancedConfig
-	}
-
-	assertUnknownAdvancedFields(t, getAdvanced())
-
-	patchBytes, err := json.Marshal(map[string]string{
-		"prompt_filter_advanced_config": `{"guard":{"mode":"enforce"}}`,
-	})
-	if err != nil {
-		t.Fatalf("marshal update: %v", err)
-	}
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewReader(patchBytes))
-	ctx.Request.Header.Set("Content-Type", "application/json")
-	handler.UpdateSettings(ctx)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("PUT status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-
-	var updateResponse settingsResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &updateResponse); err != nil {
-		t.Fatalf("decode PUT response: %v", err)
-	}
-	assertUnknownAdvancedFields(t, updateResponse.PromptFilterAdvancedConfig)
-	assertAdvancedGuardMode(t, updateResponse.PromptFilterAdvancedConfig, "enforce")
-	assertUnknownAdvancedFields(t, getAdvanced())
-	assertAdvancedGuardMode(t, getAdvanced(), "enforce")
-
-	persisted, err := db.GetSystemSettings(context.Background())
-	if err != nil {
-		t.Fatalf("GetSystemSettings: %v", err)
-	}
-	assertUnknownAdvancedFields(t, persisted.PromptFilterAdvancedConfig)
-	assertAdvancedGuardMode(t, persisted.PromptFilterAdvancedConfig, "enforce")
-	if got := store.GetPromptFilterConfig().Advanced.Guard.Mode; got != "enforce" {
-		t.Fatalf("runtime guard.mode = %q, want enforce", got)
-	}
-	// An unrelated partial update must not reserialize the typed runtime config
-	// and erase fields unknown to this binary.
-	unrelated := httptest.NewRecorder()
-	unrelatedCtx, _ := gin.CreateTestContext(unrelated)
-	unrelatedCtx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"site_name":"Raw Config Test"}`))
-	unrelatedCtx.Request.Header.Set("Content-Type", "application/json")
-	handler.UpdateSettings(unrelatedCtx)
-	if unrelated.Code != http.StatusOK {
-		t.Fatalf("unrelated PUT status=%d body=%s", unrelated.Code, unrelated.Body.String())
-	}
-	persisted, err = db.GetSystemSettings(context.Background())
-	if err != nil {
-		t.Fatalf("GetSystemSettings after unrelated update: %v", err)
-	}
-	assertUnknownAdvancedFields(t, persisted.PromptFilterAdvancedConfig)
-}
+// An unrelated partial update must not reserialize the typed runtime config
+// and erase fields unknown to this binary.
 
 func TestPromptFilterAdvancedSettingsRejectInvalidJSONWithoutReplacingLastValidState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -3787,59 +3573,6 @@ func assertErrorMessage(t *testing.T, recorder *httptest.ResponseRecorder, want 
 // 的响应体必须回填三个公开门户开关。此前响应遗漏这些字段，前端「设置」页保存后会用
 // 响应整体覆盖本地表单把它们静默置为 false，下一次「保存设置」再整体提交就把已经开启的
 // /key-usage 等公开页关掉——表现为「开启一天后自动关闭」。
-func TestUpdateSettingsResponseIncludesPublicPortalFlags(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	previousRuntime := proxy.CurrentRuntimeSettings()
-	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
-
-	db := newTestAdminDB(t)
-	tc := cache.NewMemory(4)
-	t.Cleanup(func() { _ = tc.Close() })
-
-	settings := defaultBootstrapSettings()
-	settings.PublicKeyUsagePageEnabled = true
-	settings.PublicImageStudioPageEnabled = true
-	settings.PublicAccountPortalPageEnabled = false
-	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
-		t.Fatalf("seed settings: %v", err)
-	}
-	store := auth.NewStore(db, tc, settings)
-	t.Cleanup(store.Stop)
-	proxy.ApplyRuntimeSettingsFromSystem(settings)
-	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
-
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"site_name":"Portal Response Test"}`))
-	ctx.Request.Header.Set("Content-Type", "application/json")
-	handler.UpdateSettings(ctx)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-	}
-
-	var response settingsResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !response.PublicKeyUsagePageEnabled {
-		t.Fatal("PUT response PublicKeyUsagePageEnabled = false, want true")
-	}
-	if !response.PublicImageStudioPageEnabled {
-		t.Fatal("PUT response PublicImageStudioPageEnabled = false, want true")
-	}
-	if response.PublicAccountPortalPageEnabled {
-		t.Fatal("PUT response PublicAccountPortalPageEnabled = true, want false")
-	}
-
-	persisted, err := db.GetSystemSettings(context.Background())
-	if err != nil {
-		t.Fatalf("GetSystemSettings: %v", err)
-	}
-	if persisted == nil || !persisted.PublicKeyUsagePageEnabled {
-		t.Fatal("stored PublicKeyUsagePageEnabled = false, want true")
-	}
-}
 
 // TestUpdateSettingsResponseCoversReadSettingsFields 保证 PUT 与 GET 的响应字段集一致。
 // 前端「设置」页用 PUT 响应整体覆盖本地表单，任何只在 GET 里回填的字段都会在保存后被

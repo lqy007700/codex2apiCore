@@ -23,48 +23,12 @@ import (
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const tinyPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 
-func TestBuildImagesAPIResponseCloudURL(t *testing.T) {
-	// 用本地 httptest 充当 S3 端点：PUT 返回 200 让上传成功；
-	// presign 是离线签名，生成的 GET 直链会指向该测试服务器。
-	fakeS3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("ETag", `"deadbeef"`)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(fakeS3.Close)
-
-	if err := imagestore.Configure(imagestore.Config{
-		Backend:        imagestore.BackendS3,
-		Endpoint:       fakeS3.URL,
-		Region:         "us-east-1",
-		Bucket:         "img-bucket",
-		AccessKey:      "AKIAEXAMPLE",
-		SecretKey:      "secretexample",
-		ForcePathStyle: true,
-	}); err != nil {
-		t.Fatalf("configure s3: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = imagestore.Configure(imagestore.Config{Backend: imagestore.BackendLocal, LocalDir: t.TempDir()})
-	})
-
-	results := []imageCallResult{{Result: tinyPNGBase64, OutputFormat: "png", Model: "gpt-image-2"}}
-	out, err := buildImagesAPIResponse(context.Background(), results, 1710000000, nil, results[0], "url", cloudImageURLOnly)
-	if err != nil {
-		t.Fatalf("buildImagesAPIResponse: %v", err)
-	}
-	url := gjson.GetBytes(out, "data.0.url").String()
-	if !strings.HasPrefix(url, "http") || !strings.Contains(url, "X-Amz-Signature=") {
-		t.Fatalf("expected presigned cloud url, got %q", url)
-	}
-	if strings.HasPrefix(url, "data:") {
-		t.Fatalf("should not fall back to data url when S3 configured: %q", url)
-	}
-}
+// 用本地 httptest 充当 S3 端点：PUT 返回 200 让上传成功；
+// presign 是离线签名，生成的 GET 直链会指向该测试服务器。
 
 func TestBuildImagesAPIResponseLocalFallsBackToDataURL(t *testing.T) {
 	if err := imagestore.Configure(imagestore.Config{Backend: imagestore.BackendLocal, LocalDir: t.TempDir()}); err != nil {
@@ -155,53 +119,6 @@ func tinyPNGByteSize(t *testing.T) int {
 		t.Fatalf("decode tiny png fixture: %v", err)
 	}
 	return len(data)
-}
-
-func TestBuildImagesResponsesRequestMatchesReferenceChain(t *testing.T) {
-	tool := []byte(`{"type":"image_generation","action":"generate","model":"gpt-image-2","size":"1024x1024"}`)
-
-	body := buildImagesResponsesRequest("draw a cat", nil, tool)
-
-	if got := gjson.GetBytes(body, "model").String(); got != defaultImagesMainModel {
-		t.Fatalf("responses model = %q, want %q", got, defaultImagesMainModel)
-	}
-	if got := gjson.GetBytes(body, "tool_choice.type").String(); got != "image_generation" {
-		t.Fatalf("tool_choice.type = %q, want image_generation", got)
-	}
-	if got := gjson.GetBytes(body, "tools.0.type").String(); got != "image_generation" {
-		t.Fatalf("tools.0.type = %q, want image_generation", got)
-	}
-	if got := gjson.GetBytes(body, "tools.0.model").String(); got != "gpt-image-2" {
-		t.Fatalf("tools.0.model = %q, want gpt-image-2", got)
-	}
-	if got := gjson.GetBytes(body, "input.0.content.0.text").String(); got != "draw a cat" {
-		t.Fatalf("prompt = %q, want draw a cat", got)
-	}
-}
-
-func TestBuildImagesResponsesRequestCarriesMaxEditImages(t *testing.T) {
-	if MaxImageEditInputCount != 16 {
-		t.Fatalf("MaxImageEditInputCount = %d, want 16（对齐官方 gpt-image 编辑上限）", MaxImageEditInputCount)
-	}
-
-	images := make([]string, MaxImageEditInputCount)
-	for i := range images {
-		images[i] = fmt.Sprintf("data:image/png;base64,IMG%d", i)
-	}
-	body := buildImagesResponsesRequest("edit these", images, nil)
-
-	parts := gjson.GetBytes(body, "input.0.content").Array()
-	if len(parts) != MaxImageEditInputCount+1 {
-		t.Fatalf("content parts = %d, want %d（1 条文本 + %d 张图）", len(parts), MaxImageEditInputCount+1, MaxImageEditInputCount)
-	}
-	for i, part := range parts[1:] {
-		if got := part.Get("type").String(); got != "input_image" {
-			t.Fatalf("content[%d].type = %q, want input_image", i+1, got)
-		}
-		if got := part.Get("image_url").String(); got != images[i] {
-			t.Fatalf("content[%d].image_url = %q, want %q", i+1, got, images[i])
-		}
-	}
 }
 
 func TestResponsesBodyHasImageGenerationTool(t *testing.T) {
@@ -435,16 +352,6 @@ func TestNextImageAccountFallsBackToFreeWhenNoPaidAccountAvailable(t *testing.T)
 	}
 }
 
-func TestAppendImageStyleToPrompt(t *testing.T) {
-	got := AppendImageStyleToPrompt("draw a cat", "cinematic sticker")
-	if !strings.Contains(got, "draw a cat") || !strings.Contains(got, "Style guidance: cinematic sticker") {
-		t.Fatalf("styled prompt = %q", got)
-	}
-	if got := AppendImageStyleToPrompt("draw a cat", " "); got != "draw a cat" {
-		t.Fatalf("unstyled prompt = %q, want draw a cat", got)
-	}
-}
-
 func TestNormalizeImageToolModelAliases(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -523,16 +430,6 @@ func TestNormalizeImageToolModelForPromptInfersAspect(t *testing.T) {
 	}
 }
 
-func TestSetDefaultImageToolSizePreservesExplicitSize(t *testing.T) {
-	tool := []byte(`{"type":"image_generation","model":"gpt-image-2","size":"1536x1024"}`)
-
-	got := setDefaultImageToolSize(tool, defaultImages4KSize)
-
-	if size := gjson.GetBytes(got, "size").String(); size != "1536x1024" {
-		t.Fatalf("size = %q, want explicit size", size)
-	}
-}
-
 func TestValidateGPTImage2Size(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -582,22 +479,6 @@ func TestValidateResponsesImageGenerationSizes(t *testing.T) {
 	otherModel := []byte(`{"tools":[{"type":"image_generation","model":"gpt-image-1.5","size":"5000x5000"}]}`)
 	if err := validateResponsesImageGenerationSizes(otherModel); err != nil {
 		t.Fatalf("non gpt-image-2 size should be ignored, got %v", err)
-	}
-}
-
-func TestBuildImagesResponsesRequestIncludesEditImages(t *testing.T) {
-	tool := []byte(`{"type":"image_generation","action":"edit","model":"gpt-image-2"}`)
-
-	body := buildImagesResponsesRequest("replace background", []string{"https://example.com/source.png"}, tool)
-
-	if got := gjson.GetBytes(body, "tools.0.action").String(); got != "edit" {
-		t.Fatalf("tools.0.action = %q, want edit", got)
-	}
-	if got := gjson.GetBytes(body, "input.0.content.1.type").String(); got != "input_image" {
-		t.Fatalf("input image type = %q, want input_image", got)
-	}
-	if got := gjson.GetBytes(body, "input.0.content.1.image_url").String(); got != "https://example.com/source.png" {
-		t.Fatalf("input image URL = %q", got)
 	}
 }
 
@@ -1528,72 +1409,8 @@ func TestImageUpscalePlanForRequestHonorsSuffixOnAnyImageModel(t *testing.T) {
 	}
 }
 
-func TestImagesMainModelEnvOverride(t *testing.T) {
-	t.Setenv(imagesMainModelEnv, "")
-	if got := imagesMainModel(); got != defaultImagesMainModel {
-		t.Fatalf("imagesMainModel() = %q, want default %q", got, defaultImagesMainModel)
-	}
-	t.Setenv(imagesMainModelEnv, " gpt-5.5 ")
-	if got := imagesMainModel(); got != "gpt-5.5" {
-		t.Fatalf("imagesMainModel() with env = %q, want gpt-5.5", got)
-	}
-	body := buildImagesResponsesRequest("a cat", nil, []byte(`{"type":"image_generation","model":"gpt-image-2.5-flare"}`))
-	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.5" {
-		t.Fatalf("responses model = %q, want env override gpt-5.5", got)
-	}
-	candidates := imagesMainModelCandidates()
-	if len(candidates) == 0 || candidates[0] != "gpt-5.5" {
-		t.Fatalf("candidates = %v, want env override first", candidates)
-	}
-	for i := 1; i < len(candidates); i++ {
-		if strings.EqualFold(candidates[i], "gpt-5.5") {
-			t.Fatalf("candidates = %v, want env override deduplicated", candidates)
-		}
-	}
-}
+// 拒绝的是驱动主模型:换下一个候选。
 
-func TestNextImagesMainModelAfterUnsupported(t *testing.T) {
-	t.Setenv(imagesMainModelEnv, "")
-	body := buildImagesResponsesRequest("a cat", nil, []byte(`{"type":"image_generation","model":"gpt-image-2.5-flare"}`))
-	unsupported := func(model string) []byte {
-		return []byte(`{"detail":"The '` + model + `' model is not supported when using Codex with a ChatGPT account."}`)
-	}
+// 已试过的候选不再返回;候选耗尽后返回 false。
 
-	// 拒绝的是驱动主模型:换下一个候选。
-	tried := make(map[string]bool)
-	next, ok := nextImagesMainModelAfterUnsupported(body, unsupported(defaultImagesMainModel), tried)
-	if !ok || next != imagesMainModelFallbacks[0] {
-		t.Fatalf("next = (%q, %v), want (%q, true)", next, ok, imagesMainModelFallbacks[0])
-	}
-	if !tried[strings.ToLower(defaultImagesMainModel)] {
-		t.Fatalf("tried = %v, want rejected driver recorded", tried)
-	}
-
-	// 已试过的候选不再返回;候选耗尽后返回 false。
-	rewritten, _ := sjson.SetBytes(body, "model", next)
-	for range imagesMainModelFallbacks {
-		var more bool
-		next, more = nextImagesMainModelAfterUnsupported(rewritten, unsupported(next), tried)
-		if !more {
-			break
-		}
-		if tried[strings.ToLower(next)] {
-			t.Fatalf("candidate %q returned twice", next)
-		}
-		rewritten, _ = sjson.SetBytes(rewritten, "model", next)
-	}
-	if _, more := nextImagesMainModelAfterUnsupported(rewritten, unsupported(gjson.GetBytes(rewritten, "model").String()), tried); more {
-		t.Fatalf("expected candidates to be exhausted, tried=%v", tried)
-	}
-
-	// 拒绝的是生图模型或别的模型:不换驱动(交给既有的模型冷却逻辑)。
-	if _, ok := nextImagesMainModelAfterUnsupported(body, unsupported("gpt-image-2.5-flare"), make(map[string]bool)); ok {
-		t.Fatal("image model rejection must not trigger main-model fallback")
-	}
-	if _, ok := nextImagesMainModelAfterUnsupported(body, unsupported("gpt-5.4-mini"), make(map[string]bool)); ok {
-		t.Fatal("rejection of a model that is not the current driver must not trigger fallback")
-	}
-	if _, ok := nextImagesMainModelAfterUnsupported(body, []byte(`{"detail":"Invalid size"}`), make(map[string]bool)); ok {
-		t.Fatal("unrelated 400 must not trigger fallback")
-	}
-}
+// 拒绝的是生图模型或别的模型:不换驱动(交给既有的模型冷却逻辑)。

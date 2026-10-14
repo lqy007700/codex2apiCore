@@ -822,13 +822,6 @@ func injectClaudeMetadataUserID(body []byte, id claudeBodyIdentity) []byte {
 
 // mergeAnthropicBeta 把入站声明的 anthropic-beta 与 OAuth 必需的 oauth-2025-04-20
 // 合并去重,保证 OAuth 头始终在列。
-func mergeAnthropicBeta(incoming http.Header) string {
-	return mergeAnthropicBetaWithConfig(incoming, auth.DefaultClaudeSecurityConfig())
-}
-
-func mergeAnthropicBetaWithConfig(incoming http.Header, cfg auth.ClaudeSecurityConfig) string {
-	return buildClaudeBetaHeader(incoming, cfg, nil)
-}
 
 // buildClaudeBetaHeader 生成贴近真实 Claude Code CLI 抓包顺序的 anthropic-beta:
 //

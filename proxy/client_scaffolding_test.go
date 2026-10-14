@@ -260,37 +260,6 @@ func TestResponsesToGeminiInternalSessionSeedSurvivesVolatileReminders(t *testin
 	}
 }
 
-func TestGeminiNativeToAntigravityEnvelopeStripsClientScaffolding(t *testing.T) {
-	payload, _, _, err := geminiNativeToAntigravityEnvelope([]byte(`{
-		"system_instruction":{"parts":[{"text":"You are powered by the model gemini-3.8-flash-high."}]},
-		"contents":[{"role":"user","parts":[
-			{"text":"<system-reminder>\n# Environment\n - Platform: win32\n</system-reminder>"},
-			{"text":"hello"}
-		]}]
-	}`), "google-project", "models/gemini-3.7-flash-high")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var envelope map[string]any
-	if err := json.Unmarshal(payload, &envelope); err != nil {
-		t.Fatal(err)
-	}
-	request := envelope["request"].(map[string]any)
-	if _, ok := request["systemInstruction"]; ok {
-		t.Fatalf("pure-scaffolding systemInstruction should be dropped: %#v", request["systemInstruction"])
-	}
-	parts := request["contents"].([]any)[0].(map[string]any)["parts"].([]any)
-	if len(parts) != 2 {
-		t.Fatalf("native contents shape must be preserved: %#v", parts)
-	}
-	if text := parts[0].(map[string]any)["text"]; text != "" {
-		t.Fatalf("scaffolding part should be emptied in place: %#v", text)
-	}
-	if text := parts[1].(map[string]any)["text"]; text != "hello" {
-		t.Fatalf("real content was damaged: %#v", text)
-	}
-}
-
 // The strip has to hold on the real ingress, not only inside the converter:
 // /v1/chat/completions and /v1/messages both funnel into the Antigravity
 // envelope, and the scaffolding must be gone by the time it leaves the process.

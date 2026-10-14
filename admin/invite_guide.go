@@ -3,16 +3,12 @@ package admin
 import (
 	"context"
 	"log"
-	"net/http"
-	"sort"
-	"strconv"
-	"strings"
+
 	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
-	"github.com/gin-gonic/gin"
 )
 
 // 导入后自动探测的账号数上限。每个账号 = 一次 Cloudflare 防护端点的请求，万级导入
@@ -70,28 +66,8 @@ type inviteGuideAccountPlan struct {
 // inviteTrackingCounts 汇总一份跟踪快照里的发送/接受/在途数量。
 // 实测状态取值：redeemed（已兑换）、expired（发出但受邀人未在有效期内使用）。
 // expired 既不算接受也不算在途，但仍计入「已发」。
-func inviteTrackingCounts(items []proxy.CodexInviteTrackingItem) (sent, accepted, pending int) {
-	sent = len(items)
-	for _, item := range items {
-		switch strings.ToLower(strings.TrimSpace(item.Status)) {
-		case "redeemed", "accepted":
-			accepted++
-		case "pending", "sent":
-			pending++
-		}
-	}
-	return sent, accepted, pending
-}
 
 // findSendCapacityRule 取 send 维度的月度配额规则（发送次数，与奖励次数不同）。
-func findSendCapacityRule(rules []proxy.CodexInviteTimeFrameRule) *proxy.CodexInviteTimeFrameRule {
-	for i := range rules {
-		if strings.EqualFold(strings.TrimSpace(rules[i].CapacityType), "send") {
-			return &rules[i]
-		}
-	}
-	return nil
-}
 
 // inviteGuidePlanResponse 是引导弹窗的完整数据。
 type inviteGuidePlanResponse struct {
@@ -139,18 +115,8 @@ func inviteGuideCandidate(acc *auth.Account) bool {
 // referrerGrantAmount 取「邀请人能拿到的」那份奖励。上游对每次邀请下发两条 grant：
 // recipient=referrer 是邀请人（我方收益），recipient=recipient 是受邀人。必须按
 // recipient 过滤，否则把受邀人那份也算进自己的收益，预估会正好翻一倍。
-func referrerGrantAmount(grants []proxy.CodexInviteGrant) float64 {
-	for _, g := range grants {
-		if strings.EqualFold(strings.TrimSpace(g.Recipient), "referrer") {
-			return g.Amount
-		}
-	}
-	// 上游没标 recipient 时：只有一条就按它算，多条无从分辨则不猜。
-	if len(grants) == 1 {
-		return grants[0].Amount
-	}
-	return 0
-}
+
+// 上游没标 recipient 时：只有一条就按它算，多条无从分辨则不猜。
 
 // probeInviteEligibilityForGuide 探测单个账号的邀请资格并写入快照。
 // includeTracking 为真时顺带抓已发邀请记录（已发/已接受计数的唯一来源）。
@@ -271,234 +237,29 @@ func (h *Handler) inviteGuideEnabled(ctx context.Context) bool {
 }
 
 // buildInviteGuidePlan 按账号 ID 汇总评估结果并排出建议顺序。
-func (h *Handler) buildInviteGuidePlan(ctx context.Context, ids []int64, emailBudget int) inviteGuidePlanResponse {
-	programID, entrypoint := proxy.NormalizeInviteProgram("", "")
-	scope := inviteEligibilityScope(programID, entrypoint)
-	trackingPeriod, trackingLimit := proxy.NormalizeInviteTracking("", 0)
-	trackingScope := inviteTrackingScope(programID, trackingPeriod, trackingLimit)
 
-	resp := inviteGuidePlanResponse{
-		Enabled:     h.inviteGuideEnabled(ctx),
-		ProbeCap:    inviteGuideProbeCap,
-		EmailBudget: emailBudget,
-		Accounts:    make([]inviteGuideAccountPlan, 0, len(ids)),
-	}
+// 已发/已接受来自跟踪快照。只读缓存，没有就不填——导入探测只写资格，
+// 多数账号这里本来就没有数据，编一个 0 会被读成「一封都没发过」。
 
-	for _, id := range ids {
-		account := h.lookupInviteAccount(id)
-		if !inviteGuideCandidate(account) {
-			continue
-		}
-		resp.Total++
-
-		item := inviteGuideAccountPlan{
-			ID:       id,
-			Email:    account.Email,
-			PlanType: account.PlanType,
-			State:    inviteGuideStatePending,
-		}
-
-		var elig proxy.CodexInviteEligibility
-		meta := h.readInviteCache(ctx, inviteEligibilityCacheNamespace,
-			database.CodexInviteSnapshotEligibility, id, account.GetCredentialGeneration(), scope, &elig)
-		if meta == nil {
-			resp.Pending++
-			resp.Accounts = append(resp.Accounts, item)
-			continue
-		}
-
-		resp.Probed++
-		if meta.ObservedAt != nil {
-			item.ObservedAt = meta.ObservedAt
-		}
-		item.RemainingSendCapacity = elig.RemainingSendCapacity
-		item.RemainingRewardCapacity = elig.RemainingRewardCapacity
-		item.OfferID = elig.OfferID
-		item.Title = elig.Title
-		item.GrantAmount = referrerGrantAmount(elig.Grants)
-		if rule := findSendCapacityRule(elig.TimeFrameRules); rule != nil {
-			sent, total := rule.InvitesSent, rule.InvitesTotal
-			item.MonthlySent, item.MonthlySendTotal = &sent, &total
-		}
-
-		// 已发/已接受来自跟踪快照。只读缓存，没有就不填——导入探测只写资格，
-		// 多数账号这里本来就没有数据，编一个 0 会被读成「一封都没发过」。
-		var tracking proxy.CodexInviteTracking
-		if h.readInviteCache(ctx, inviteTrackingCacheNamespace, database.CodexInviteSnapshotTracking,
-			id, account.GetCredentialGeneration(), trackingScope, &tracking) != nil {
-			h.rememberInviteTrackingRecipients(ctx, id, programID, entrypoint, &tracking)
-			sent, accepted, pending := inviteTrackingCounts(tracking.Items)
-			item.InvitesSent, item.InvitesAccepted, item.InvitesPending = &sent, &accepted, &pending
-		}
-
-		switch {
-		case !elig.ShouldShow:
-			item.State = inviteGuideStateIneligible
-			item.IneligibleReason = elig.IneligibleReason
-			if item.IneligibleReason == "" {
-				item.IneligibleReason = elig.IneligibleReasonCode
-			}
-		case elig.RemainingRewardCapacity != nil && *elig.RemainingRewardCapacity == 0:
-			// 还能发，但发了也拿不到奖励——对「攒积分」这个目标等于没有价值。
-			item.State = inviteGuideStateExhausted
-		default:
-			item.State = inviteGuideStateEligible
-			resp.Eligible++
-			if elig.RemainingRewardCapacity != nil {
-				item.SuggestedInvites = *elig.RemainingRewardCapacity
-				resp.RewardCap += item.SuggestedInvites
-			}
-			item.PotentialCredits = item.GrantAmount * float64(item.SuggestedInvites)
-		}
-
-		resp.Accounts = append(resp.Accounts, item)
-	}
-
-	sortInviteGuidePlan(resp.Accounts)
-	applyInviteGuideEmailBudget(resp.Accounts, emailBudget)
-
-	resp.TotalPotentialCredits = 0
-	for i := range resp.Accounts {
-		resp.TotalPotentialCredits += resp.Accounts[i].PotentialCredits
-	}
-	return resp
-}
+// 还能发，但发了也拿不到奖励——对「攒积分」这个目标等于没有价值。
 
 // sortInviteGuidePlan 排出「先用哪个号发」的顺序：可发的排前面，其次按单次收益、
 // 剩余奖励次数、预估总收益降序。单次收益优先于剩余次数——邮箱是稀缺资源时，
 // 把一封邮件用在单次给得更多的号上才是最优。
-func sortInviteGuidePlan(items []inviteGuideAccountPlan) {
-	rank := map[string]int{
-		inviteGuideStateEligible:   0,
-		inviteGuideStatePending:    1,
-		inviteGuideStateExhausted:  2,
-		inviteGuideStateIneligible: 3,
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		a, b := items[i], items[j]
-		if rank[a.State] != rank[b.State] {
-			return rank[a.State] < rank[b.State]
-		}
-		if a.GrantAmount != b.GrantAmount {
-			return a.GrantAmount > b.GrantAmount
-		}
-		if a.SuggestedInvites != b.SuggestedInvites {
-			return a.SuggestedInvites > b.SuggestedInvites
-		}
-		return a.ID < b.ID
-	})
-}
 
 // applyInviteGuideEmailBudget 在受邀邮箱有限时做贪心分配。列表已按单次收益降序，
 // 依次把预算分给靠前的号即为最优——总收益 = Σ(单次收益)，取值最高的前 N 个名额。
-func applyInviteGuideEmailBudget(items []inviteGuideAccountPlan, budget int) {
-	if budget <= 0 {
-		return
-	}
-	remaining := budget
-	for i := range items {
-		if items[i].State != inviteGuideStateEligible {
-			continue
-		}
-		if remaining <= 0 {
-			items[i].SuggestedInvites = 0
-			items[i].PotentialCredits = 0
-			continue
-		}
-		if items[i].SuggestedInvites > remaining {
-			items[i].SuggestedInvites = remaining
-		}
-		remaining -= items[i].SuggestedInvites
-		items[i].PotentialCredits = items[i].GrantAmount * float64(items[i].SuggestedInvites)
-	}
-}
 
 // parseInviteGuideIDs 解析逗号分隔的账号 ID，去重并保序。
-func parseInviteGuideIDs(raw string) []int64 {
-	seen := make(map[int64]struct{})
-	ids := make([]int64, 0, 8)
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		id, err := strconv.ParseInt(part, 10, 64)
-		if err != nil || id <= 0 {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
-	}
-	return ids
-}
 
 // GetInviteGuidePlan 汇总一批账号的邀请收益评估。
 // GET /api/admin/accounts/invite/plan?ids=1,2,3&emails=5
-func (h *Handler) GetInviteGuidePlan(c *gin.Context) {
-	ids := parseInviteGuideIDs(c.Query("ids"))
-	if len(ids) == 0 {
-		writeError(c, http.StatusBadRequest, "缺少账号 ID")
-		return
-	}
-	budget, _ := strconv.Atoi(strings.TrimSpace(c.Query("emails")))
-	c.JSON(http.StatusOK, h.buildInviteGuidePlan(c.Request.Context(), ids, budget))
-}
 
 // ProbeInviteGuidePlan 为指定账号补探测（弹窗里的「继续探测剩余」）。
 // POST /api/admin/accounts/invite/plan/probe  {"ids":[1,2,3]}
-func (h *Handler) ProbeInviteGuidePlan(c *gin.Context) {
-	var req struct {
-		IDs []int64 `json:"ids"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error())
-		return
-	}
-	candidates := make([]int64, 0, len(req.IDs))
-	for _, id := range req.IDs {
-		if inviteGuideCandidate(h.lookupInviteAccount(id)) {
-			candidates = append(candidates, id)
-		}
-	}
-	if len(candidates) == 0 {
-		writeError(c, http.StatusBadRequest, "没有可探测的 Codex 账号")
-		return
-	}
-	queued, skipped := h.enqueueInviteGuideProbes(candidates, inviteGuideProbeBatch, true)
-	c.JSON(http.StatusOK, gin.H{"queued": queued, "skipped": skipped})
-}
 
 // GetInviteGuideSettings 返回引导弹窗开关。
 // GET /api/admin/settings/invite-guide
-func (h *Handler) GetInviteGuideSettings(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"enabled": h.inviteGuideEnabled(c.Request.Context())})
-}
 
 // UpdateInviteGuideSettings 更新引导弹窗开关。弹窗里的「今后不弹出」打到这里。
 // PUT /api/admin/settings/invite-guide  {"enabled":false}
-func (h *Handler) UpdateInviteGuideSettings(c *gin.Context) {
-	var req struct {
-		Enabled *bool `json:"enabled"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error())
-		return
-	}
-	if req.Enabled == nil {
-		writeError(c, http.StatusBadRequest, "缺少 enabled 字段")
-		return
-	}
-	if h.db == nil {
-		writeError(c, http.StatusServiceUnavailable, "数据库不可用")
-		return
-	}
-	if err := h.db.SaveInviteGuideConfig(c.Request.Context(),
-		database.InviteGuideConfig{Enabled: req.Enabled}); err != nil {
-		writeError(c, http.StatusInternalServerError, "保存失败: "+err.Error())
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"enabled": *req.Enabled})
-}

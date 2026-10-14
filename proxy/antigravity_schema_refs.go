@@ -162,24 +162,3 @@ func antigravityDeepCopySchemaValue(value any) any {
 		return typed
 	}
 }
-
-func antigravitySchemaHasRef(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		if ref, ok := typed["$ref"].(string); ok && strings.HasPrefix(strings.TrimSpace(ref), "#/") {
-			return true
-		}
-		for _, item := range typed {
-			if antigravitySchemaHasRef(item) {
-				return true
-			}
-		}
-	case []any:
-		for _, item := range typed {
-			if antigravitySchemaHasRef(item) {
-				return true
-			}
-		}
-	}
-	return false
-}

@@ -135,23 +135,3 @@ func TestAntigravityInlineLocalSchemaRefsHandlesCycles(t *testing.T) {
 		t.Fatalf("cycle should retain hint description: %#v", node)
 	}
 }
-
-func TestAntigravityGeminiParametersInlinesRefBeforeCleanup(t *testing.T) {
-	got := antigravityGeminiParameters(map[string]any{
-		"type": "object",
-		"$defs": map[string]any{
-			"query": map[string]any{"type": "string", "format": "uri"},
-		},
-		"properties": map[string]any{
-			"query": map[string]any{"$ref": "#/$defs/query"},
-		},
-		"required": []any{"query"},
-	})
-	query, _ := got["properties"].(map[string]any)["query"].(map[string]any)
-	if query["type"] != "string" {
-		t.Fatalf("query = %#v", query)
-	}
-	if antigravitySchemaHasRef(got) {
-		t.Fatalf("final schema still contains $ref: %#v", got)
-	}
-}

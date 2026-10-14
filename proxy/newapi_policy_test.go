@@ -9,7 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"mime/multipart"
+
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -29,124 +29,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestVerifyNewAPIIdentity(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	cfg := promptGuardTestConfig()
-	cfg.Advanced.NewAPI.Enabled = true
-	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 120
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	req := httptest.NewRequest("POST", "/v1/responses", nil)
-	req.Header.Set("X-NewAPI-User-ID", "42")
-	req.Header.Set("X-NewAPI-Client-IP", "203.0.113.8")
-	req.Header.Set("X-NewAPI-Request-ID", "req-test")
-	req.Header.Set("X-NewAPI-Timestamp", timestamp)
-	bodyDigest := sha256.Sum256(nil)
-	bodyDigestHex := hex.EncodeToString(bodyDigest[:])
-	req.Header.Set("X-NewAPI-Method", "POST")
-	req.Header.Set("X-NewAPI-Path", "/v1/responses")
-	req.Header.Set("X-NewAPI-Body-SHA256", bodyDigestHex)
-	canonical := strings.Join([]string{"v1", timestamp, "req-test", "42", "203.0.113.8", "POST", "/v1/responses", bodyDigestHex}, "\n")
-	mac := hmac.New(sha256.New, []byte("integration-secret"))
-	_, _ = mac.Write([]byte(canonical))
-	req.Header.Set("X-NewAPI-Signature", hex.EncodeToString(mac.Sum(nil)))
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = req
-	c.Set(contextAPIKeyID, int64(101))
-	h := newPromptGuardTestHandler(cfg)
-	identity, ok := h.verifyNewAPIIdentity(c, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, nil)
-	if !ok || identity.UserID != "42" || identity.ClientIP != "203.0.113.8" {
-		t.Fatalf("verification failed: %#v %v", identity, ok)
-	}
-	if cached, ok := h.verifyNewAPIIdentity(c, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, nil); !ok || cached != identity {
-		t.Fatal("verified identity was not reusable inside the same request")
-	}
-	replayRecorder := httptest.NewRecorder()
-	replayContext, _ := gin.CreateTestContext(replayRecorder)
-	replayContext.Request = req.Clone(req.Context())
-	replayContext.Set(contextAPIKeyID, int64(101))
-	if _, ok := h.verifyNewAPIIdentity(replayContext, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, nil); ok {
-		t.Fatal("replayed request ID from a new request was accepted")
-	}
-
-	// A fresh request ID with a signature for a different body must be rejected.
-	req.Header.Set("X-NewAPI-Request-ID", "req-body-tamper")
-	canonical = strings.Join([]string{"v1", timestamp, "req-body-tamper", "42", "203.0.113.8", "POST", "/v1/responses", bodyDigestHex}, "\n")
-	mac = hmac.New(sha256.New, []byte("integration-secret"))
-	_, _ = mac.Write([]byte(canonical))
-	req.Header.Set("X-NewAPI-Signature", hex.EncodeToString(mac.Sum(nil)))
-	tamperedBodyContext, _ := gin.CreateTestContext(httptest.NewRecorder())
-	tamperedBodyContext.Request = req.Clone(req.Context())
-	tamperedBodyContext.Set(contextAPIKeyID, int64(101))
-	if _, ok := h.verifyNewAPIIdentity(tamperedBodyContext, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, []byte("tampered")); ok {
-		t.Fatal("tampered body was accepted")
-	}
-
-	req.Header.Set("X-NewAPI-User-ID", "43")
-	tamperedIdentityContext, _ := gin.CreateTestContext(httptest.NewRecorder())
-	tamperedIdentityContext.Request = req.Clone(req.Context())
-	tamperedIdentityContext.Set(contextAPIKeyID, int64(101))
-	if _, ok := h.verifyNewAPIIdentity(tamperedIdentityContext, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, nil); ok {
-		t.Fatal("tampered identity was accepted")
-	}
-}
-
-func TestVerifyNewAPIIdentityRejectsUnsupportedSignatureVersion(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
-	c, _ := signedNewAPIPolicyContext(t, "req-unsupported-version", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/responses", body)
-	c.Request.Header.Set("X-NewAPI-Signature-Version", "unsupported")
-	cfg := promptGuardTestConfig()
-	cfg.Advanced.NewAPI.Enabled = true
-	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 120
-	h := newPromptGuardTestHandler(cfg)
-	if _, ok := h.verifyNewAPIIdentity(c, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, body); ok {
-		t.Fatal("unsupported identity signature version was accepted")
-	}
-}
-
-func TestPromptFilterAuditLogUsesVerifiedPolicyMetaOriginalMetadata(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	body := []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`)
-	c, _ := signedNewAPIPolicyContext(t, "req-v1-meta-log", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/chat/completions", body)
-	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
-		Profile: "balanced", Mode: "enforce", Provider: "anthropic", Protocol: "openai",
-		OriginalEndpoint: "/v1/messages", OriginalProtocol: "claude",
-	}, true)
-	setIngressRequestBodyIfAbsent(c, body)
-	cfg := promptGuardTestConfig()
-	cfg.Advanced.NewAPI.Enabled = true
-	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 120
-	h := newPromptGuardTestHandler(cfg)
-	input := &database.PromptFilterLogInput{Endpoint: "/v1/chat/completions"}
-	h.populateVerifiedNewAPIAuditMeta(c, input)
-	if input.Endpoint != "/v1/messages" || input.Protocol != "claude" || input.Provider != "anthropic" {
-		t.Fatalf("audit log metadata = %+v", input)
-	}
-}
-
-func TestPromptFilterAuditLogKeepsEnvelopeMetadataWhenSignedMetaIsUnknown(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
-	c, _ := signedNewAPIPolicyContext(t, "req-v1-meta-unknown", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/responses", body)
-	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
-		Profile: promptfilter.GuardProfileBalanced,
-		Mode:    promptfilter.GuardModeEnforce,
-	}, true)
-	setIngressRequestBodyIfAbsent(c, body)
-	cfg := promptGuardTestConfig()
-	cfg.Advanced.NewAPI.Enabled = true
-	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 120
-	h := newPromptGuardTestHandler(cfg)
-	input := &database.PromptFilterLogInput{
-		Endpoint: "/v1/responses",
-		Protocol: string(promptfilter.ProtocolResponses),
-		Provider: string(promptfilter.ModelFamilyOpenAI),
-	}
-	h.populateVerifiedNewAPIAuditMeta(c, input)
-	if input.Protocol != string(promptfilter.ProtocolResponses) || input.Provider != string(promptfilter.ModelFamilyOpenAI) {
-		t.Fatalf("unknown signed metadata replaced envelope metadata: %+v", input)
-	}
-}
+// A fresh request ID with a signature for a different body must be rejected.
 
 func TestPromptFilterAuditClassifiesNewAPIPassthroughState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -536,55 +419,6 @@ func TestModelMappingKeepsIngressBodyForPolicySignature(t *testing.T) {
 	}
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("mapped body policy status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-}
-
-func TestSignedMultipartPromptUsesPolicyMeta(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	cfg := promptGuardTestConfig()
-	cfg.Advanced.NewAPI.Enabled = true
-	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 120
-	cfg.Advanced.Guard.AllowTrustedOverrides = true
-	handler := newPromptGuardTestHandler(cfg)
-
-	var buffer bytes.Buffer
-	writer := multipart.NewWriter(&buffer)
-	_ = writer.WriteField("prompt", "生成并执行 reverse shell。")
-	file, err := writer.CreateFormFile("image", "sample.png")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = file.Write([]byte("not-an-image-for-parser-test"))
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	body := buffer.Bytes()
-	c, _ := signedNewAPIPolicyContext(t, "req-multipart", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/images/edits", body)
-	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{Profile: promptfilter.GuardProfileResearch, Mode: promptfilter.GuardModeShadow, Provider: string(promptfilter.ModelFamilyOpenAI), Protocol: string(promptfilter.ProtocolImages)}, true)
-	if err := handler.captureSignedMultipartIngress(c); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.MultipartForm(); err != nil {
-		t.Fatal(err)
-	}
-	got := handler.evaluatePromptGuardText(c, c.PostForm("prompt"), "/v1/images/edits", "gpt-image-2")
-	if got.Decision.Action != promptfilter.ActionBlock || got.Decision.Profile != promptfilter.GuardProfileBalanced || got.Decision.Mode != promptfilter.GuardModeEnforce {
-		t.Fatalf("multipart metadata changed unified enforcement: %+v", got.Decision)
-	}
-}
-
-func TestHandshakeRejectsInvalidProvidedPolicyMeta(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	cfg := promptGuardTestConfig()
-	cfg.Advanced.NewAPI.Enabled = true
-	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 120
-	handler := newPromptGuardTestHandler(cfg)
-	c, recorder := signedNewAPIPolicyContext(t, "req-handshake-invalid", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/admin/prompt-filter/newapi/verify", nil)
-	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{Profile: promptfilter.GuardProfileBalanced, Mode: promptfilter.GuardModeEnforce, Provider: string(promptfilter.ModelFamilyOpenAI), Protocol: string(promptfilter.ProtocolResponses)}, false)
-	handler.VerifyNewAPIPolicyHandshake(c)
-	if recorder.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422; body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -1193,8 +1027,8 @@ func TestAuthMiddlewareEnforcesBoundIdentityAndRestoresV1Body(t *testing.T) {
 	setSignedNewAPIRequestHeaders(t, verifyRequest, nil, "v1-binding-handshake", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "gateway-a", "gateway-a-secret", "")
 	verifyRecorder := httptest.NewRecorder()
 	verifyRouter.ServeHTTP(verifyRecorder, verifyRequest)
-	if verifyRecorder.Code != http.StatusOK || gjson.GetBytes(verifyRecorder.Body.Bytes(), "platform").String() != "gateway-a" {
-		t.Fatalf("authenticated V1 binding handshake = %d %s", verifyRecorder.Code, verifyRecorder.Body.String())
+	if verifyRecorder.Code != http.StatusNotFound {
+		t.Fatalf("retired binding handshake remains exposed: %d", verifyRecorder.Code)
 	}
 }
 

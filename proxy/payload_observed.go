@@ -95,13 +95,3 @@ func RecordObservedInstructions(body []byte, headers http.Header) {
 }
 
 // ObservedInstructions 返回最近观测样本（新→旧）。
-func ObservedInstructions() []ObservedInstructionsSample {
-	observedInstructionsMu.Lock()
-	defer observedInstructionsMu.Unlock()
-	out := make([]ObservedInstructionsSample, len(observedInstructionsSamples))
-	copy(out, observedInstructionsSamples)
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out
-}

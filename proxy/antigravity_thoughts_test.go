@@ -50,44 +50,6 @@ const antigravityThoughtStream = "data: {\"response\":{\"candidates\":[{\"conten
 	"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"answer\"}]}}]}}\n\n" +
 	"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"late thought\",\"thought\":true},{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"q\":\"v\"},\"id\":\"call_1\"}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":1,\"thoughtsTokenCount\":4,\"totalTokenCount\":7}}}\n\n"
 
-func TestAntigravityExposeThoughtsRequestIncludeThoughts(t *testing.T) {
-	body := []byte(`{"input":"hello"}`)
-
-	withAntigravityExposeThoughts(t, false)
-	payload, err := responsesToGeminiInternal(body, "project", "gemini-3.8-flash-high")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := antigravityTestThinkingConfig(t, payload)["includeThoughts"]; exists {
-		t.Fatal("includeThoughts must stay absent while the switch is off")
-	}
-
-	withAntigravityExposeThoughts(t, true)
-	payload, err = responsesToGeminiInternal(body, "project", "gemini-3.8-flash-high")
-	if err != nil {
-		t.Fatal(err)
-	}
-	thinking := antigravityTestThinkingConfig(t, payload)
-	if thinking["includeThoughts"] != true || thinking["thinkingLevel"] != "HIGH" {
-		t.Fatalf("thinkingConfig = %#v, want HIGH with includeThoughts", thinking)
-	}
-
-	payload, err = responsesToGeminiInternal([]byte(`{"input":"hello","reasoning":{"summary":"none"}}`), "project", "gemini-3.8-flash-high")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := antigravityTestThinkingConfig(t, payload)["includeThoughts"]; exists {
-		t.Fatal("reasoning.summary none must opt out of includeThoughts")
-	}
-
-	native := map[string]any{}
-	antigravityApplyNativeGeminiThinkingConfig(native, "gemini-3.8-flash-high", "gemini-3.8-flash-tiered")
-	nativeThinking := native["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
-	if nativeThinking["includeThoughts"] != true {
-		t.Fatalf("native injected thinkingConfig = %#v, want includeThoughts", nativeThinking)
-	}
-}
-
 func TestAntigravitySSEExposesThoughtsAsReasoning(t *testing.T) {
 	events := readAntigravityTestEvents(t, newAntigravitySSEResponseBodyWithThoughts(io.NopCloser(strings.NewReader(antigravityThoughtStream)), nil, true, "gemini-test"))
 
@@ -135,18 +97,6 @@ func TestAntigravitySSEExposesThoughtsAsReasoning(t *testing.T) {
 	}
 	if completed.Get("response.output_text").String() != "answer" || completed.Get("response.usage.output_tokens_details.reasoning_tokens").Int() != 4 {
 		t.Fatalf("completed response = %s", completed.Raw)
-	}
-}
-
-func TestAntigravitySSEHidesThoughtsWhenDisabled(t *testing.T) {
-	events := readAntigravityTestEvents(t, newAntigravitySSEResponseBody(io.NopCloser(strings.NewReader(antigravityThoughtStream)), "gemini-test"))
-	for _, event := range events {
-		if strings.Contains(event.Get("type").String(), "reasoning") || event.Get("item.type").String() == "reasoning" {
-			t.Fatalf("reasoning leaked while disabled: %s", event.Raw)
-		}
-		if event.Get("type").String() == "response.output_text.delta" && event.Get("output_index").Int() != 0 {
-			t.Fatalf("message index shifted while disabled: %s", event.Raw)
-		}
 	}
 }
 

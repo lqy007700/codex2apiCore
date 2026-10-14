@@ -648,168 +648,16 @@ func rebuildGrokHistoryItem(item map[string]any, register grokAliasRegister) (ma
 //     直接移除该工具（上游无法表达"仅索引、禁外网"，保守降级）。
 //
 // 同步改写 tool_choice 与 input[] 历史引用。无相关内容时原样返回、映射 nil（零开销快速路径）。
-func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity) {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return body, nil
-	}
 
-	register, aliases := newGrokAliasRegister()
-	changed := false
-	webSearchDropped := false
+// 1) tools[]：展平 namespace，归一 web_search。
 
-	// 1) tools[]：展平 namespace，归一 web_search。
-	if rawTools, ok := payload["tools"].([]any); ok {
-		newTools := make([]any, 0, len(rawTools))
-		emittedFunctions := make(map[string]bool)
-		appendTool := func(tool any) {
-			if object, ok := tool.(map[string]any); ok && grokNsStringField(object, "type") == "function" {
-				name := strings.TrimSpace(grokNsStringField(object, "name"))
-				if name != "" && emittedFunctions[name] {
-					changed = true
-					return
-				}
-				if name != "" {
-					emittedFunctions[name] = true
-				}
-			}
-			newTools = append(newTools, tool)
-		}
-		for _, rt := range rawTools {
-			tool, ok := rt.(map[string]any)
-			if !ok {
-				appendTool(rt)
-				continue
-			}
-			kind := grokNsStringField(tool, "type")
-			if kind == "tool_search" {
-				alias := register("", grokToolSearchProxyName, false, true)
-				appendTool(grokFunctionToolForToolSearch(alias))
-				changed = true
-				continue
-			}
-			if kind == "function" {
-				name := strings.TrimSpace(grokNsStringField(tool, "name"))
-				registered := register("", name, false, false)
-				if registered != name {
-					tool["name"] = registered
-					changed = true
-				}
-				normalized := normalizeGrokFunctionTool(tool, registered)
-				if !reflect.DeepEqual(tool, normalized) {
-					changed = true
-				}
-				appendTool(normalized)
-				continue
-			}
-			if kind == "custom" {
-				name := strings.TrimSpace(grokNsStringField(tool, "name"))
-				alias := register("", name, true, false)
-				appendTool(grokFunctionToolForCustom(tool, alias))
-				changed = true
-				continue
-			}
-			if _, isWebSearch := grokWebSearchTypes[kind]; isWebSearch {
-				converted, keep, toolChanged := normalizeGrokWebSearchTool(tool)
-				if toolChanged {
-					changed = true
-				}
-				if keep {
-					appendTool(converted)
-				} else {
-					webSearchDropped = true
-				}
-				continue
-			}
-			if kind != "namespace" {
-				appendTool(tool)
-				continue
-			}
-			namespace := strings.TrimSpace(grokNsStringField(tool, "name"))
-			children, _ := tool["tools"].([]any)
-			for _, rc := range children {
-				child, ok := rc.(map[string]any)
-				if !ok {
-					continue
-				}
-				childType := grokNsStringField(child, "type")
-				if childType != "function" && childType != "custom" {
-					continue
-				}
-				name := strings.TrimSpace(grokNsStringField(child, "name"))
-				alias := register(namespace, name, childType == "custom", false)
-				if childType == "custom" {
-					child = grokFunctionToolForCustom(child, alias)
-				} else {
-					child = normalizeGrokFunctionTool(child, alias)
-				}
-				appendTool(child)
-			}
-			changed = true
-		}
-		if changed {
-			payload["tools"] = newTools
-		}
-	}
+// web_search 被整体移除时，指向它的 tool_choice 也要撤掉，否则上游校验失败。
 
-	// web_search 被整体移除时，指向它的 tool_choice 也要撤掉，否则上游校验失败。
-	if webSearchDropped {
-		if tc, ok := payload["tool_choice"].(map[string]any); ok {
-			if _, isWebSearch := grokWebSearchTypes[grokNsStringField(tc, "type")]; isWebSearch {
-				delete(payload, "tool_choice")
-			}
-		}
-	}
+// 2) tool_choice：{type:function,name,namespace} → {type:function,name:alias}。
 
-	// 2) tool_choice：{type:function,name,namespace} → {type:function,name:alias}。
-	if tc, ok := payload["tool_choice"].(map[string]any); ok {
-		kind := grokNsStringField(tc, "type")
-		if kind == "custom" {
-			name := strings.TrimSpace(grokNsStringField(tc, "name"))
-			tc["type"] = "function"
-			tc["name"] = register(strings.TrimSpace(grokNsStringField(tc, "namespace")), name, true, false)
-			delete(tc, "namespace")
-			changed = true
-		} else if kind == "tool_search" {
-			tc["type"] = "function"
-			tc["name"] = register("", grokToolSearchProxyName, false, true)
-			changed = true
-		} else if kind == "function" {
-			if namespace := strings.TrimSpace(grokNsStringField(tc, "namespace")); namespace != "" {
-				name := strings.TrimSpace(grokNsStringField(tc, "name"))
-				tc["name"] = register(namespace, name, false, false)
-				delete(tc, "namespace")
-				changed = true
-			}
-		}
-	}
-
-	// 3) input[] 历史：按 Grok 原生 InputItem 契约逐项重建——只保留每种类型的白名单字段、
-	//    丢弃 Codex 扩展字段与 null（否则 Grok 严格 untagged enum 反序列化 422），
-	//    function_call 的 namespace 引用改写成扁平名以匹配工具声明，外来 compaction 项换成边界消息。
-	if input, ok := payload["input"].([]any); ok {
-		for i, ri := range input {
-			item, ok := ri.(map[string]any)
-			if !ok {
-				continue
-			}
-			rebuilt, itemChanged := rebuildGrokHistoryItem(item, register)
-			if itemChanged {
-				input[i] = rebuilt
-				changed = true
-			}
-		}
-	}
-
-	if !changed {
-		return body, nil
-	}
-	out, err := json.Marshal(payload)
-	if err != nil {
-		return body, nil
-	}
-	return out, aliases
-}
+// 3) input[] 历史：按 Grok 原生 InputItem 契约逐项重建——只保留每种类型的白名单字段、
+//    丢弃 Codex 扩展字段与 null（否则 Grok 严格 untagged enum 反序列化 422），
+//    function_call 的 namespace 引用改写成扁平名以匹配工具声明，外来 compaction 项换成边界消息。
 
 // normalizeGrokWebSearchTool 把 Codex 的 web_search 工具降级为 Grok 上游接受的最小形态：
 // {type:"web_search"}（+ filters.allowed_domains）。external_web_access:false 时 keep=false
@@ -1020,35 +868,8 @@ func reverseGrokNamespaceJSON(data []byte, aliases map[string]grokNsIdentity) []
 }
 
 // reverseGrokNamespaceSSELine 反解一行 SSE（仅处理携带 function_call 的 data: 行）。
-func reverseGrokNamespaceSSELine(line []byte, aliases map[string]grokNsIdentity) []byte {
-	if !bytes.Contains(line, []byte(`"function_call"`)) {
-		return line
-	}
-	// 保留行首 "data:" 前缀与行尾换行，仅重写中间的 JSON。
-	trimmed := bytes.TrimRight(line, "\r\n")
-	suffix := line[len(trimmed):]
-	const prefix = "data:"
-	idx := bytes.Index(trimmed, []byte(prefix))
-	if idx < 0 {
-		return line
-	}
-	head := trimmed[:idx+len(prefix)]
-	payload := bytes.TrimLeft(trimmed[idx+len(prefix):], " ")
-	gap := trimmed[idx+len(prefix) : len(trimmed)-len(payload)]
-	if len(payload) == 0 || payload[0] != '{' {
-		return line
-	}
-	rewritten := reverseGrokNamespaceJSON(payload, aliases)
-	if bytes.Equal(rewritten, payload) {
-		return line
-	}
-	out := make([]byte, 0, len(head)+len(gap)+len(rewritten)+len(suffix))
-	out = append(out, head...)
-	out = append(out, gap...)
-	out = append(out, rewritten...)
-	out = append(out, suffix...)
-	return out
-}
+
+// 保留行首 "data:" 前缀与行尾换行，仅重写中间的 JSON。
 
 // newGrokNamespaceReverser 包装上游响应体：流式按行反解 function_call 名，非流式整体反解。
 // 仅在存在别名映射时调用。

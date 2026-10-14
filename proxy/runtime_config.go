@@ -353,7 +353,7 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.ClientCompatMode = settings.ClientCompatMode
 		next.CodexMinCLIVersion = settings.CodexMinCLIVersion
 		next.CodexUserAgentConfig = settings.CodexUserAgentConfig
-		next.CodexTelemetryEnabled = settings.CodexTelemetryEnabled
+		next.CodexTelemetryEnabled = false // Removed from the account service.
 		next.CodexTelemetryTimingDebug = settings.CodexTelemetryTimingDebug
 		next.CodexUnifiedClientIdentityEnabled = settings.CodexUnifiedClientIdentityEnabled
 		next.CodexImagesMainModel = settings.CodexImagesMainModel

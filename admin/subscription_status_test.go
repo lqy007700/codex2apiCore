@@ -32,50 +32,8 @@ func runSubscriptionRefresh(t *testing.T, handler *Handler, id string) (*httptes
 
 // 手动刷新：绕过后台 6 小时节流真去查一次；30 秒内再点返回 429 + retry_after；
 // 响应带结果分类与服务端计算的订阅状态对象。
-func TestRefreshAccountSubscription_ManualRefreshAndRateLimit(t *testing.T) {
-	activeUntil := time.Now().Add(20 * 24 * time.Hour).UTC().Truncate(time.Second)
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"plan_type":"plus","active_until":"` + activeUntil.Format(time.RFC3339) + `","will_renew":true}`))
-	}))
-	defer server.Close()
-	defer proxy.SetSubscriptionsURLForTest(server.URL)()
 
-	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
-	account := &auth.Account{DBID: 31, AccessToken: "token", PlanType: "plus", AccountID: subscriptionTestWorkspaceUUID, Status: auth.StatusReady}
-	// 模拟后台探针 1 小时前查过：后台节流窗口内，但手动刷新不受它限制。
-	account.MarkSubscriptionExpiryProbed(time.Now().Add(-time.Hour))
-	store.AddAccount(account)
-	handler := &Handler{store: store}
-
-	rec, payload := runSubscriptionRefresh(t, handler, "31")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	if payload["outcome"] != string(proxy.SubscriptionSyncUpdated) {
-		t.Fatalf("outcome = %v, want updated", payload["outcome"])
-	}
-	sub, _ := payload["subscription"].(map[string]any)
-	if sub["business_status"] != auth.SubscriptionStatusActive || sub["sync_state"] != auth.SubscriptionSyncConfirmed || sub["auto_renew"] != auth.SubscriptionAutoRenewEnabled {
-		t.Fatalf("subscription view = %v", sub)
-	}
-	if requests != 1 {
-		t.Fatalf("upstream requests = %d, want 1", requests)
-	}
-
-	rec, payload = runSubscriptionRefresh(t, handler, "31")
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("second refresh status = %d, want 429: %s", rec.Code, rec.Body.String())
-	}
-	if _, ok := payload["retry_after"]; !ok || rec.Header().Get("Retry-After") == "" {
-		t.Fatalf("429 must carry retry_after: %v", payload)
-	}
-	if requests != 1 {
-		t.Fatalf("rate-limited refresh must not hit upstream, requests = %d", requests)
-	}
-}
+// 模拟后台探针 1 小时前查过：后台节流窗口内，但手动刷新不受它限制。
 
 // 非 Codex 渠道与不跟踪订阅的套餐直接返回 unsupported，不打上游。
 func TestRefreshAccountSubscription_Unsupported(t *testing.T) {

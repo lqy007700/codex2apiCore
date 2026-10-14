@@ -1,14 +1,12 @@
 package proxy
 
 import (
-	"archive/zip"
-	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
+
 	"strconv"
 	"sync"
 )
@@ -89,70 +87,9 @@ func codexDesktopPackageVersion(data []byte) (string, error) {
 	return pkg.Version, nil
 }
 
-func codexWindowsPackageVersion(ctx context.Context, client *http.Client) (string, []int64, error) {
-	resp, err := codexBuildRequest(ctx, client, codexBuildRequestSpec{Method: http.MethodGet, URL: codexWindowsUpdateURL})
-	if err != nil {
-		return "", nil, err
-	}
-	data, err := codexReadSmallResponse(resp, 64<<10)
-	if err != nil {
-		return "", nil, err
-	}
-	var update struct {
-		PackageIdentity string `json:"packageIdentity"`
-		BuildVersion    string `json:"buildVersion"`
-	}
-	if err := json.Unmarshal(data, &update); err != nil {
-		return "", nil, err
-	}
-	parts, valid := codexBuildParts(update.BuildVersion, 4)
-	if !valid || update.PackageIdentity != "OpenAI.Codex" {
-		return "", nil, fmt.Errorf("invalid Windows update manifest")
-	}
-	return update.BuildVersion, parts, nil
-}
-
 // FetchCodexDesktopWindowsBuild 以 Range 分片读取 MSIX 内 ASAR 的压缩前缀。
-func FetchCodexDesktopWindowsBuild(ctx context.Context, proxyURL string) (string, error) {
-	client, closeClient := codexBuildHTTPClient(codexWindowsUpdateURL, proxyURL)
-	defer closeClient()
-	packageVersion, parts, err := codexWindowsPackageVersion(ctx, client)
-	if err != nil {
-		return "", err
-	}
-	// 版本化路径并非每个 Store 版本都会上传，缺失时回退到最新包。
-	var ranges *codexRangeReader
-	fallback := false
-	for i, url := range []string{
-		codexMSIXBaseURL + "releases/" + packageVersion + "/ChatGPT-x64.msix",
-		codexMSIXBaseURL + "ChatGPT-x64.msix",
-	} {
-		ranges, err = newCodexRangeReader(ctx, client, url)
-		fallback = i > 0
-		if !errors.Is(err, errCodexMSIXNotFound) {
-			break
-		}
-	}
-	if err != nil {
-		return "", err
-	}
-	cacheKey := ""
-	if ranges.etag != "" {
-		cacheKey = fmt.Sprintf("%s|%s|%d", ranges.url, ranges.etag, ranges.size)
-	}
-	version, cached := codexWindowsBuildCache.get(cacheKey)
-	if !cached {
-		if version, err = codexMSIXPackageVersion(ranges); err != nil {
-			return "", err
-		}
-		codexWindowsBuildCache.put(cacheKey, version)
-	}
-	buildParts, ok := codexBuildParts(version, 3)
-	if !ok || !codexWindowsBuildMatchesStore(buildParts, parts, fallback) {
-		return "", fmt.Errorf("Desktop package version %s does not match Store build %s", version, packageVersion)
-	}
-	return version, nil
-}
+
+// 版本化路径并非每个 Store 版本都会上传，缺失时回退到最新包。
 
 // codexWindowsBuildMatchesStore:版本化包必须与清单主次版本一致;回退的最新包常落后于
 // 清单几天(Store 先发布、包后上传),只拒绝比清单还新的异常包。
@@ -188,27 +125,4 @@ func (m *codexWindowsBuildMemo) put(key, version string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.key, m.version = key, version
-}
-
-func codexMSIXPackageVersion(ranges *codexRangeReader) (string, error) {
-	archive, err := zip.NewReader(ranges, ranges.size)
-	if err != nil {
-		return "", err
-	}
-	for _, file := range archive.File {
-		if file.Name != "app/resources/app.asar" {
-			continue
-		}
-		if file.Method != zip.Deflate {
-			return "", fmt.Errorf("unsupported ASAR ZIP compression %d", file.Method)
-		}
-		stream, err := file.Open()
-		if err != nil {
-			return "", err
-		}
-		version, parseErr := codexASARPackageVersion(stream)
-		_ = stream.Close()
-		return version, parseErr
-	}
-	return "", fmt.Errorf("Desktop app.asar not found in MSIX")
 }

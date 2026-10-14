@@ -23,7 +23,6 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
-	"github.com/codex2api/internal/imagestore"
 	"github.com/codex2api/internal/version"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/proxy/wsrelay"
@@ -217,34 +216,6 @@ func main() {
 		log.Fatalf("加载响应缓存设置失败: %v", err)
 	}
 	responseCacheCancel()
-	antigravityOAuthCtx, antigravityOAuthCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	if raw, err := db.LoadAntigravityOAuthConfig(antigravityOAuthCtx); err != nil {
-		log.Printf("加载 Antigravity OAuth client 设置失败(继续以环境变量为准): %v", err)
-	} else if parsed, parseErr := auth.ParseAntigravityOAuthSettings(raw); parseErr != nil {
-		log.Printf("Antigravity OAuth client 设置解析失败(继续以环境变量为准,请在管理页重新保存): %v", parseErr)
-	} else {
-		auth.SetConfiguredAntigravityOAuth(parsed)
-		if len(parsed.Clients) > 0 {
-			log.Printf("Antigravity OAuth client 设置已加载: %d 个 client", len(parsed.Clients))
-		}
-	}
-	antigravityOAuthCancel()
-	antigravityCfgCtx, antigravityCfgCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	if raw, err := db.LoadAntigravityConfig(antigravityCfgCtx); err != nil {
-		log.Printf("加载 Antigravity 渠道设置失败(模型重定向不生效): %v", err)
-	} else if parsed, parseErr := auth.ParseAntigravitySettings(raw); parseErr != nil {
-		log.Printf("Antigravity 渠道设置解析失败(模型重定向不生效,请在管理页重新保存): %v", parseErr)
-	} else {
-		auth.SetConfiguredAntigravitySettings(parsed)
-		if len(parsed.ModelRedirects) > 0 {
-			log.Printf("Antigravity 模型重定向已加载: %d 条", len(parsed.ModelRedirects))
-		}
-		if parsed.ExposeThoughts {
-			log.Printf("Antigravity 思考内容下发已开启")
-		}
-	}
-	antigravityCfgCancel()
-
 	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
 	log.Printf(
 		"响应缓存设置已加载: generation=%d total=%d entry=%d reconstruct=%d",
@@ -295,6 +266,7 @@ func main() {
 	if overrides, perr := database.ParseModelPricingOverridesJSON(settings.ModelPricingOverrides); perr == nil {
 		database.SetModelPricingOverrides(overrides)
 	}
+	settings.CodexTelemetryEnabled = false
 	runtimeSettings := proxy.ApplyRuntimeSettingsFromSystem(settings)
 	log.Printf("运行时优化配置: client_compat=%s min_cli=%s usage_log=%s batch=%d flush=%ds stream_flush=%s/%dms first_token_mode=%s first_token_timeout=%ds billing_tier_policy=%s",
 		runtimeSettings.ClientCompatMode,
@@ -309,17 +281,6 @@ func main() {
 		runtimeSettings.BillingTierPolicy,
 	)
 
-	// 4b'. 应用图片存储后端配置
-	imgLocalDir := strings.TrimSpace(os.Getenv("IMAGE_ASSET_DIR"))
-	if imgLocalDir == "" {
-		imgLocalDir = "/data/images"
-	}
-	if imgCfg, err := imagestore.ApplyFromJSON(settings.ImageStorageConfig, imgLocalDir); err != nil {
-		log.Printf("图片存储配置应用失败，已回退到本地: %v", err)
-	} else {
-		log.Printf("图片存储后端: %s", imgCfg.Backend)
-	}
-
 	// 4c. 初始化 Resin 粘性代理池
 	if settings.ResinURL != "" && settings.ResinPlatformName != "" {
 		proxy.SetResinConfig(&proxy.ResinConfig{
@@ -332,17 +293,10 @@ func main() {
 		}
 	}
 
-	// Claude CLI 同步版本先于账号加载发布，保证 GenerateClaudeFingerprint 与回写使用同一生效版本。
-	claudeCLIVersionCtx, claudeCLIVersionCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if synced, err := db.GetClaudeSyncedCLIVersion(claudeCLIVersionCtx); err == nil {
-		auth.SetClaudeSyncedCLIVersion(synced)
-	} else {
-		log.Printf("读取 Claude CLI 同步版本失败（使用内置 %s）: %v", auth.BuiltinClaudeCLIVersion, err)
-	}
-	claudeCLIVersionCancel()
-
 	// 5. 初始化账号管理器
+	db.EnableCodexOnly()
 	store := auth.NewStore(db, tc, settings)
+	store.EnableCodexOnly()
 	store.SetSchedulerWaitLimits(cfg.SchedulerMaxWaiters, cfg.SchedulerMaxWaitersPerKey)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -366,31 +320,17 @@ func main() {
 	store.TriggerAutoCleanupAsync()
 	defer store.Stop()
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
-	adminHandler.StartQualityTests(backgroundCtx)
 	defer cancelBackground()
 	if !proxy.StartResponseCacheSettingsPoller(backgroundCtx, db) {
 		log.Fatalf("启动响应缓存设置同步失败")
 	}
 	adminHandler.StartAutoResetCredits(backgroundCtx)
 	adminHandler.StartAutoActivate5hWindow(backgroundCtx)
-	// Grok 账号状态定期探测（默认关，由 grok 系统设置开关/间隔控制）
-	adminHandler.StartGrokStatusProbe(backgroundCtx)
-	// 官方结算用量按天快照：上游只保留 7 天，不落库就永久丢失，长期历史全靠这个任务。
-	adminHandler.StartWhamDailyUsageProbe(backgroundCtx)
-	// 官方模型价目轮询默认关闭；启用后只在网络解析完成后做一次短数据库写入。
-	adminHandler.StartOfficialPricingSync(backgroundCtx)
-	// Prompt 审核日志保留清理：默认保留 7 天，每小时分批清理过期行，CY 关联行不动。
-	adminHandler.StartPromptLogRetention(backgroundCtx)
-	// Responses API 渠道监控按账号启用，健康检查和倍率探测分别调度。
-	adminHandler.StartChannelMonitor(backgroundCtx)
 
 	// 后台定时同步 Codex CLI 模拟版本（启动即拉一次，之后按设置的间隔）；
 	// 出上游新版本门槛时无需发版即可跟进。开关/间隔在设置页可调，
 	// CODEX_DISABLE_CLI_VERSION_SYNC 为硬关闭。
 	proxy.StartCodexCLIVersionSync(backgroundCtx, db, store.GetProxyURL)
-
-	// Claude Code CLI 版本同步：启动先用生效版本回写账号指纹，再按 ClaudeConfig 开关/间隔联网同步。
-	proxy.StartClaudeCLIVersionSync(backgroundCtx, db, store, store.GetProxyURL)
 
 	log.Printf("账号就绪: %d/%d 可用", store.AvailableCount(), store.AccountCount())
 
@@ -454,18 +394,6 @@ func main() {
 	log.Printf("单账号并发上限: %d", settings.MaxConcurrency)
 
 	handler.RegisterRoutes(r)
-	adminHandler.RegisterExternalImageRoutes(r, handler)
-	imageWorkers, queueErr := admin.ImageJobWorkerCount()
-	if queueErr != nil {
-		log.Fatal(queueErr)
-	}
-	if err := adminHandler.StartImageJobQueue(backgroundCtx, imageWorkers); err != nil {
-		log.Fatalf("Initialize image queue: %v", err)
-	}
-	if err := adminHandler.StartImageMaintenance(backgroundCtx); err != nil {
-		log.Fatalf("Initialize image maintenance: %v", err)
-	}
-	adminHandler.StartPromptIntelligence(backgroundCtx)
 	adminHandler.RegisterRoutes(r)
 
 	// 管理后台前端静态文件
@@ -512,72 +440,11 @@ func main() {
 			}
 			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 		}
-		serveKeyUsageFrontend := func(c *gin.Context) {
-			ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-			defer cancel()
-
-			enabled, err := adminHandler.PublicAPIKeyUsagePageEnabled(ctx)
-			if err != nil {
-				log.Printf("读取 API Key 自助用量页开关失败: %v", err)
-				c.Status(http.StatusInternalServerError)
-				return
-			}
-			if !enabled {
-				c.Status(http.StatusNotFound)
-				return
-			}
-			serveFrontend(c)
-		}
-		serveImageStudioFrontend := func(c *gin.Context) {
-			ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-			defer cancel()
-
-			enabled, err := adminHandler.PublicImageStudioPageEnabled(ctx)
-			if err != nil {
-				log.Printf("读取生图门户开关失败: %v", err)
-				c.Status(http.StatusInternalServerError)
-				return
-			}
-			if !enabled {
-				c.Status(http.StatusNotFound)
-				return
-			}
-			serveFrontend(c)
-		}
-		serveAccountPortalFrontend := func(c *gin.Context) {
-			ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-			defer cancel()
-
-			enabled, err := adminHandler.PublicAccountPortalPageEnabled(ctx)
-			if err != nil {
-				log.Printf("读取账号自助门户开关失败: %v", err)
-				c.Status(http.StatusInternalServerError)
-				return
-			}
-			if !enabled {
-				c.Status(http.StatusNotFound)
-				return
-			}
-			serveFrontend(c)
-		}
-
 		// 同时处理 /admin 和 /admin/*，避免依赖自动补斜杠重定向。
 		r.GET("/admin", serveFrontend)
 		r.GET("/admin/*filepath", serveFrontend)
 		r.HEAD("/admin", serveFrontend)
 		r.HEAD("/admin/*filepath", serveFrontend)
-		r.GET("/key-usage", serveKeyUsageFrontend)
-		r.GET("/key-usage/*filepath", serveKeyUsageFrontend)
-		r.HEAD("/key-usage", serveKeyUsageFrontend)
-		r.HEAD("/key-usage/*filepath", serveKeyUsageFrontend)
-		r.GET("/image-studio", serveImageStudioFrontend)
-		r.GET("/image-studio/*filepath", serveImageStudioFrontend)
-		r.HEAD("/image-studio", serveImageStudioFrontend)
-		r.HEAD("/image-studio/*filepath", serveImageStudioFrontend)
-		r.GET("/account-portal", serveAccountPortalFrontend)
-		r.GET("/account-portal/*filepath", serveAccountPortalFrontend)
-		r.HEAD("/account-portal", serveAccountPortalFrontend)
-		r.HEAD("/account-portal/*filepath", serveAccountPortalFrontend)
 	}
 
 	// 根路径重定向到管理后台（使用 302 避免浏览器永久缓存）
@@ -625,17 +492,8 @@ func main() {
 	log.Printf("  Listen: %s", addr)
 	log.Printf("  HTTP:   http://%s:%d", displayHost, cfg.Port)
 	log.Printf("  管理台: http://%s:%d/admin/", displayHost, cfg.Port)
-	log.Printf("  Key用量: http://%s:%d/key-usage", displayHost, cfg.Port)
-	log.Printf("  生图门户: http://%s:%d/image-studio", displayHost, cfg.Port)
-	log.Printf("  账号自助: http://%s:%d/account-portal", displayHost, cfg.Port)
 	log.Printf("  API:    POST /v1/chat/completions")
 	log.Printf("  API:    POST /v1/responses")
-	log.Printf("  API:    POST /v1/images/generations")
-	log.Printf("  API:    POST /v1/images/jobs")
-	log.Printf("  API:    POST /v1/images/jobs/results")
-	log.Printf("  API:    GET  /v1/images/jobs/:id")
-	log.Printf("  API:    GET  /v1/images/jobs/:id/output")
-	log.Printf("  API:    POST /v1/images/jobs/:id/ack")
 	log.Printf("  API:    POST /v1/messages")
 	log.Printf("  API:    GET  /v1/models")
 	log.Println("==========================================")

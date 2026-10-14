@@ -206,10 +206,6 @@ func antigravityOAuthGenerateCall(stream bool) antigravityOAuthUpstreamCall {
 	return antigravityOAuthUpstreamCall{Method: "generateContent", Query: ""}
 }
 
-func antigravityOAuthCountTokensCall() antigravityOAuthUpstreamCall {
-	return antigravityOAuthUpstreamCall{Method: "countTokens", Query: ""}
-}
-
 type antigravityOAuthSuccessTransform func(resp *http.Response, stream bool, publicModel string) (*http.Response, error)
 
 func executeAntigravityOAuthRequest(ctx context.Context, account *auth.Account, payload []byte, call antigravityOAuthUpstreamCall, proxyURL string, wireModel string, transform antigravityOAuthSuccessTransform) (*http.Response, error) {
@@ -1642,30 +1638,6 @@ func antigravityExtractInlineImagePart(m map[string]any) (map[string]any, error)
 	return nil, antigravityOAuthUnsupported("remote image URLs in Antigravity OAuth adapter; use data URI")
 }
 
-func responseItemText(v any) (string, error) {
-	if s, ok := v.(string); ok {
-		return s, nil
-	}
-	arr, _ := v.([]any)
-	var out []string
-	for _, x := range arr {
-		m, ok := x.(map[string]any)
-		if !ok {
-			return "", antigravityOAuthUnsupported("non-text content parts")
-		}
-		partType := lowerStringField(m, "type")
-		if partType != "" && partType != "input_text" && partType != "output_text" && partType != "text" {
-			return "", antigravityOAuthUnsupported("content part type " + partType)
-		}
-		if s, ok := m["text"].(string); ok {
-			out = append(out, s)
-		} else if s, ok := m["content"].(string); ok {
-			out = append(out, s)
-		}
-	}
-	return strings.Join(out, "\n"), nil
-}
-
 func lowerStringField(m map[string]any, key string) string {
 	if m == nil {
 		return ""
@@ -1756,16 +1728,9 @@ func readBoundedAntigravityBody(r io.ReadCloser, limit int64) ([]byte, error) {
 	return body, nil
 }
 
-func newAntigravityJSONResponseBody(r io.ReadCloser, model string) (io.ReadCloser, error) {
-	return newAntigravityJSONResponseBodyWithCustomTools(r, model, nil)
-}
-
 // newAntigravityJSONResponseBodyWithCustomTools additionally carries the set of
 // freeform tool names declared by the request, so their calls are rebuilt as
 // custom_tool_call instead of function_call.
-func newAntigravityJSONResponseBodyWithCustomTools(r io.ReadCloser, model string, customTools map[string]bool) (io.ReadCloser, error) {
-	return newAntigravityJSONResponseBodyWithThoughts(r, model, customTools, false)
-}
 
 // newAntigravityJSONResponseBodyWithThoughts additionally places Gemini thought
 // parts in a leading reasoning output item when exposeThoughts is set.
@@ -1774,14 +1739,6 @@ func newAntigravityJSONResponseBodyWithThoughts(r io.ReadCloser, model string, c
 	// Freeze the synthetic Responses creation time before that work starts.
 	createdAt := time.Now().Unix()
 	return newAntigravityJSONResponseBodyAtWithThoughts(r, model, createdAt, customTools, exposeThoughts)
-}
-
-func newAntigravityJSONResponseBodyAt(r io.ReadCloser, model string, createdAt int64) (io.ReadCloser, error) {
-	return newAntigravityJSONResponseBodyAtWithCustomTools(r, model, createdAt, nil)
-}
-
-func newAntigravityJSONResponseBodyAtWithCustomTools(r io.ReadCloser, model string, createdAt int64, customTools map[string]bool) (io.ReadCloser, error) {
-	return newAntigravityJSONResponseBodyAtWithThoughts(r, model, createdAt, customTools, false)
 }
 
 func newAntigravityJSONResponseBodyAtWithThoughts(r io.ReadCloser, model string, createdAt int64, customTools map[string]bool, exposeThoughts bool) (io.ReadCloser, error) {
@@ -1992,15 +1949,8 @@ type antigravitySSEBody struct {
 	jsonModeToolCalled bool
 }
 
-func newAntigravitySSEResponseBody(r io.ReadCloser, model ...string) io.ReadCloser {
-	return newAntigravitySSEResponseBodyWithCustomTools(r, nil, model...)
-}
-
 // newAntigravitySSEResponseBodyWithCustomTools additionally carries the set of
 // freeform tool names declared by the request.
-func newAntigravitySSEResponseBodyWithCustomTools(r io.ReadCloser, customTools map[string]bool, model ...string) io.ReadCloser {
-	return newAntigravitySSEResponseBodyWithThoughts(r, customTools, false, model...)
-}
 
 func newAntigravitySSEResponseBodyWithThoughts(r io.ReadCloser, customTools map[string]bool, exposeThoughts bool, model ...string) *antigravitySSEBody {
 	modelID := ""

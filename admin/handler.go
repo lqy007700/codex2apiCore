@@ -15,13 +15,11 @@ import (
 	"io"
 	"log"
 	"math"
-	"mime"
+
 	"mime/multipart"
-	"net"
+
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
+
 	"reflect"
 	"sort"
 	"strconv"
@@ -41,7 +39,6 @@ import (
 	"github.com/codex2api/security"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 // Handler 管理后台 API 处理器
@@ -391,23 +388,6 @@ func (h *Handler) startDBBackgroundTask(task func(context.Context)) bool {
 // startDBBackgroundTaskWithParent ties a task to both a caller-owned service
 // context and the database lifecycle. Cancellation of either context stops the
 // task, while the database tracker guarantees shutdown waits for its exit.
-func (h *Handler) startDBBackgroundTaskWithParent(parent context.Context, task func(context.Context)) bool {
-	if task == nil {
-		return false
-	}
-	if parent == nil {
-		parent = context.Background()
-	}
-	return h.startDBBackgroundTask(func(lifecycle context.Context) {
-		ctx, cancel := context.WithCancel(lifecycle)
-		stopParent := context.AfterFunc(parent, cancel)
-		defer func() {
-			stopParent()
-			cancel()
-		}()
-		task(ctx)
-	})
-}
 
 type importLoadTier uint8
 
@@ -818,9 +798,6 @@ func (h *Handler) markImportedRefreshFailure(accountID int64, err error) {
 // 同一 OAuth 身份。若重复，把新凭证（refresh_token 优先级最高，可自动续期）
 // 合并进已有账号——codex_* 用量快照键不在更新集里，旧账号的用量统计与按
 // 账号 ID 关联的请求历史全部保留——然后软删新插入的账号。返回 true 表示已合并。
-func (h *Handler) mergeRefreshedDuplicateIntoExisting(newID int64, source string) bool {
-	return h.mergeRefreshedDuplicateIntoExistingContext(context.Background(), newID, source)
-}
 
 func (h *Handler) mergeRefreshedDuplicateIntoExistingContext(parent context.Context, newID int64, source string) bool {
 	if h == nil || h.db == nil || h.store == nil {
@@ -1027,7 +1004,6 @@ func (h *Handler) SetAPIKeyAuthCacheHandler(handler *proxy.Handler) { h.authCach
 func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *proxy.RateLimiter, adminSecretEnv string) *Handler {
 	handler := &Handler{
 		store:                store,
-		proxyRiskJobs:        make(map[string]*proxyRiskScoringJob),
 		cache:                tc,
 		db:                   db,
 		cacheCfgStore:        db,
@@ -1039,16 +1015,9 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 		cacheDriver:          tc.Driver(),
 		cacheLabel:           tc.Label(),
 		adminSecretEnv:       adminSecretEnv,
-		imageProxy:           proxy.NewHandler(store, db, nil, nil),
 		chartCacheData:       make(map[string]*chartCacheEntry),
 		accountListCache:     make(map[string]*accountListSnapshot),
 		accountAnalysisCache: make(map[string]*accountAnalysisCacheEntry),
-		channelMonitorWake:   make(chan struct{}, 1),
-		channelMonitorSlots:  make(chan struct{}, 4),
-		channelMonitorID:     fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
-	}
-	if handler.imageProxy != nil {
-		handler.imageProxy.SetRuntimeCache(tc)
 	}
 	store.SetUsageProbeCompletionFunc(handler.invalidateAccountSnapshotCaches)
 	handler.refreshAccount = handler.refreshSingleAccount
@@ -1058,7 +1027,6 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 	handler.consumeResetCredit = proxy.ConsumeResetCreditParsed
 	handler.queryWhamDailyUsage = proxy.QueryWhamDailyUsage
 	handler.queryWhamDailyTokenBreakdown = proxy.QueryWhamDailyTokenBreakdown
-	handler.sendCodexInvite = proxy.SendCodexInvite
 	handler.whamDailyBackfillLast = make(map[int64]time.Time)
 	handler.whamDailyBackfillInFlight = make(map[int64]struct{})
 	handler.whamDailyBackfillFailedAt = make(map[int64]time.Time)
@@ -1067,11 +1035,7 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 	handler.autoActivate5hWake = make(chan struct{}, 1)
 	if db != nil {
 		handler.recordAccountEvent = db.InsertAccountEventAsync
-		if workers, _ := ImageJobWorkerCount(); workers == 0 {
-			if err := db.MarkInterruptedImageJobs(context.Background()); err != nil {
-				log.Printf("标记中断生图任务失败: %v", err)
-			}
-		}
+
 	}
 	return handler
 }
@@ -1084,124 +1048,29 @@ func (h *Handler) SetPoolSizes(pgMaxConns, redisPoolSize int) {
 
 // RegisterRoutes 注册管理 API 路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
-	r.GET("/p/img/:id", h.GetSignedImageAssetFile)
-	r.GET("/p/backgrounds/:filename", h.GetBackgroundAssetFile)
-	r.HEAD("/p/backgrounds/:filename", h.GetBackgroundAssetFile)
-	r.GET("/api/branding", h.GetBranding)
-	keyUsage := r.Group("/api/key-usage")
-	keyUsage.GET("/summary", h.GetPublicAPIKeyUsageSummary)
-	keyUsage.GET("/me", h.GetPublicAPIKeyUsageSummary)
-
-	// 账号自助添加公开门户（无 admin 鉴权；开关门控 + IP 限流；见 self_service.go）
-	accountPortal := r.Group("/api/account-portal")
-	accountPortal.Use(h.accountPortalMiddleware())
-	accountPortal.POST("/generate-auth-url", h.GenerateAccountPortalAuthURL)
-	accountPortal.POST("/submit-code", h.SubmitAccountPortalCode)
-
-	r.GET("/api/image-studio/quota", h.GetPortalImageQuota)
-	imageStudioPortal := r.Group("/api/image-studio")
-	imageStudioPortal.Use(h.imageStudioPortalAuthMiddleware())
-	imageStudioPortal.POST("/jobs", h.CreatePortalImageJob)
-	imageStudioPortal.POST("/edit-jobs", h.CreatePortalImageEditJob)
-	imageStudioPortal.GET("/jobs", h.ListPortalImageJobs)
-	imageStudioPortal.GET("/jobs/:id", h.GetPortalImageJob)
-	imageStudioPortal.DELETE("/jobs/:id", h.DeletePortalImageJob)
-	imageStudioPortal.GET("/assets", h.ListPortalImageAssets)
-	imageStudioPortal.GET("/assets/:id/file", h.GetPortalImageAssetFile)
-	imageStudioPortal.DELETE("/assets/:id", h.DeletePortalImageAsset)
-
-	// 首次初始化端点（无需鉴权，仅在系统未配置 ADMIN_SECRET 时可用）
-	// 这两个端点必须注册在 adminAuthMiddleware 之外，否则会被 fail-closed 拦截。
 	r.GET("/api/admin/bootstrap-status", h.GetBootstrapStatus)
 	r.POST("/api/admin/bootstrap", h.PostBootstrap)
-	// Static, credential-free shell. Generated HTML is delivered by the parent via
-	// postMessage and remains in an opaque-origin sandbox, never stored by the server.
-	r.GET("/api/quality-test/preview", serveQualityTestPreview)
-
 	api := r.Group("/api/admin")
-	api.Use(h.adminAuthMiddleware())
+	api.Use(h.adminAuthMiddleware(), h.codexServiceMiddleware())
 	api.Use(func(c *gin.Context) {
 		c.Next()
 		if shouldInvalidateAccountSnapshotCaches(c.Request.Method, c.Request.URL.Path, c.Writer.Status()) {
 			h.invalidateAccountSnapshotCaches()
 		}
 	})
-	api.GET("/stats", h.GetStats)
+	api.GET("/core-status", h.GetCoreStatus)
 	api.GET("/accounts", h.ListAccounts)
-	api.GET("/accounts/analysis", h.GetAccountAnalysis)
-	api.GET("/accounts/page-stats", h.GetAccountPageStats)
-	api.GET("/accounts/live", h.GetAccountLiveState)
 	api.GET("/accounts/:id", h.GetAccount)
 	api.POST("/accounts", h.AddAccount)
 	api.POST("/accounts/at", h.AddATAccount)
 	api.POST("/accounts/codex/agent-identity", h.ImportCodexAgentIdentity)
 	api.POST("/accounts/codex/agent-identity/import", h.BatchImportCodexAgentIdentity)
-	api.POST("/accounts/openai-responses", h.AddOpenAIResponsesAccount)
-	api.POST("/accounts/openai-responses/models", h.FetchOpenAIResponsesModels)
-	api.PATCH("/accounts/:id/openai-responses", h.UpdateOpenAIResponsesAccount)
-	api.GET("/accounts/:id/openai-responses/balance", h.GetOpenAIResponsesBalance)
-	api.GET("/accounts/:id/channel-monitor", h.GetChannelMonitorConfig)
-	api.PUT("/accounts/:id/channel-monitor", h.UpdateChannelMonitorConfig)
-	api.POST("/accounts/grok", h.AddGrokAccount)
-	api.POST("/accounts/grok/models", h.FetchGrokModels)
-	api.POST("/accounts/grok/batch-models", h.BatchUpdateGrokModels)
-	api.GET("/accounts/grok/export", h.ExportGrokAccounts)
-	api.POST("/accounts/grok/oauth/device/start", h.StartGrokDeviceAuth)
-	api.POST("/accounts/grok/oauth/device/poll", h.PollGrokDeviceAuth)
-	api.POST("/accounts/grok/sso/import", h.ImportGrokSSO)
-	api.POST("/accounts/grok/refresh/import", h.ImportGrokRefreshTokens)
-	api.POST("/accounts/grok/import", h.BatchImportGrokAccounts)
-	api.POST("/accounts/grok/oauth/auth-url", h.GenerateGrokAuthURL)        // 兼容旧客户端
-	api.POST("/accounts/grok/oauth/exchange-code", h.ExchangeGrokOAuthCode) // 兼容旧客户端
-	api.POST("/accounts/claude/oauth/auth-url", h.GenerateClaudeAuthURL)
-	api.POST("/accounts/claude/oauth/exchange-code", h.ExchangeClaudeOAuthCode)
-	api.POST("/accounts/claude/oauth/exchange-session-key", h.ExchangeClaudeSessionKey)
-	api.POST("/accounts/claude/import", h.ImportClaudeToken)
-	api.POST("/accounts/claude/import-setup-tokens", h.ImportClaudeSetupTokens) // 兼容旧名:同时接受 oat01/ort01
-	api.POST("/accounts/claude/import-tokens", h.ImportClaudeSetupTokens)
-	api.GET("/accounts/claude/export", h.ExportClaudeAccounts)
-	api.POST("/accounts/:id/claude/models", h.RefreshClaudeModels)
-	api.POST("/accounts/claude/models/refresh", h.RefreshAllClaudeModels)
-	api.POST("/accounts/antigravity", h.AddAntigravityAccount)
-	api.POST("/accounts/antigravity/models", h.FetchAntigravityModels)
-	api.POST("/accounts/antigravity/batch-models", h.BatchUpdateAntigravityModels)
-	api.GET("/accounts/antigravity/export", h.ExportAntigravityAccounts)
-	api.POST("/accounts/antigravity/import", h.BatchImportAntigravityAccounts)
-	api.POST("/accounts/antigravity/refresh", h.BatchRefreshAntigravityAccounts)
-	api.POST("/accounts/antigravity/oauth/start", h.StartAntigravityOAuth)
-	api.GET("/accounts/antigravity/oauth/status", h.GetAntigravityOAuthStatus)
-	api.POST("/accounts/antigravity/oauth/complete", h.CompleteAntigravityOAuth)
-	api.DELETE("/accounts/antigravity/oauth/:session_id", h.CancelAntigravityOAuth)
-	api.PATCH("/accounts/:id/antigravity", h.UpdateAntigravityAccount)
-	api.POST("/accounts/:id/antigravity/refresh", h.RefreshAntigravityAccount)
-	api.POST("/accounts/:id/antigravity/quota", h.RefreshAntigravityQuota)
-	api.GET("/accounts/:id/antigravity/state", h.GetAntigravityAccountState)
-	api.POST("/accounts/:id/antigravity/sync", h.SyncAntigravityAccountState)
-	api.POST("/accounts/:id/antigravity/capabilities/probe", h.ProbeAntigravityAccountCapabilities)
-	api.PATCH("/accounts/:id/grok", h.UpdateGrokAccount)
-	api.GET("/accounts/:id/grok/state", h.GetGrokAccountState)
-	api.POST("/accounts/:id/grok/sync", h.SyncGrokAccountState)
-	api.POST("/accounts/:id/grok/capabilities/probe", h.ProbeGrokAccountCapabilities)
-	api.GET("/accounts/:id/grok/auth-json", h.GetGrokAccountAuthJSON)
 	api.POST("/accounts/:id/oauth/exchange-code", h.UpdateOAuthAccountCode)
 	api.POST("/accounts/import", h.ImportAccounts)
-	api.POST("/accounts/sub2api/preview", h.PreviewSub2APIAccounts)
-	api.POST("/accounts/sub2api/import", h.ImportFromSub2API)
 	api.PATCH("/accounts/:id/models", h.UpdateAccountModels)
 	api.POST("/accounts/:id/models/sync-upstream", h.SyncAccountUpstreamModels)
-	api.POST("/accounts/:id/models/probe", h.ProbeAccountModels)
 	api.PATCH("/accounts/:id/scheduler", h.UpdateAccountScheduler)
-	api.GET("/channel-monitors", h.ListChannelMonitors)
-	api.GET("/channel-monitors/billing-rates", h.ListChannelMonitorBillingRates)
-	api.POST("/channel-monitors/:id/probe", h.ProbeChannelMonitorNow)
 	api.DELETE("/accounts/:id", h.DeleteAccount)
-	api.GET("/accounts/health-bars", h.GetAccountHealthBars)
-	api.GET("/accounts/recycle-bin", h.ListRecycleBinAccounts)
-	api.GET("/accounts/recycle-bin/export", h.ExportRecycleBinAccounts)
-	api.DELETE("/accounts/recycle-bin", h.EmptyRecycleBin)
-	api.POST("/accounts/recycle-bin/batch-test", h.RecycleBinBatchTest)
-	api.POST("/accounts/:id/restore", h.RestoreAccount)
-	api.DELETE("/accounts/:id/purge", h.PurgeAccount)
 	api.POST("/accounts/:id/refresh", h.RefreshAccount)
 	api.POST("/accounts/:id/enable", h.ToggleAccountEnabled)
 	api.PATCH("/accounts/:id/note", h.UpdateAccountNote)
@@ -1212,168 +1081,31 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.DELETE("/accounts/:id/model-cooldowns/:model", h.ClearAccountModelCooldown)
 	api.POST("/accounts/:id/reset-credits", h.ResetCredits)
 	api.GET("/accounts/:id/reset-credits", h.GetResetCredits)
-	api.GET("/accounts/:id/wham-daily-usage", h.GetAccountWhamDailyUsage)
-	api.POST("/accounts/:id/invite", h.SendInvite)
-	api.GET("/accounts/:id/invite/eligibility", h.GetInviteEligibility)
-	api.GET("/accounts/:id/invite/tracking", h.GetInviteTracking)
-	api.POST("/accounts/invite/recipients/check", h.CheckInviteRecipients)
-	api.GET("/accounts/invite/plan", h.GetInviteGuidePlan)
-	api.POST("/accounts/invite/plan/probe", h.ProbeInviteGuidePlan)
 	api.GET("/accounts/:id/test", h.TestConnection)
-	api.GET("/accounts/:id/model-detector", h.DetectCodexModel)
-	api.GET("/modeltrace/bank", h.GetModelTraceBank)
-	api.POST("/modeltrace/bank/update", h.UpdateModelTraceBank)
-	api.DELETE("/modeltrace/bank", h.ResetModelTraceBank)
-	api.GET("/accounts/:id/quality-test/options", h.QualityTestOptions)
-	api.POST("/accounts/:id/quality-test", h.CreateQualityTestJob)
-	api.GET("/quality-tests", h.ListQualityTests)
-	api.GET("/quality-tests/:id", h.GetQualityTest)
-	api.POST("/quality-tests/:id/cancel", h.CancelQualityTest)
-	api.GET("/quality-test-prompts", h.ListQualityTestPrompts)
-	api.POST("/quality-test-prompts", h.CreateQualityTestPrompt)
-	api.PATCH("/quality-test-prompts/:id", h.UpdateQualityTestPrompt)
-	api.DELETE("/quality-test-prompts/:id", h.DeleteQualityTestPrompt)
 	api.GET("/accounts/:id/usage", h.GetAccountUsage)
 	api.POST("/accounts/:id/usage/refresh", h.RefreshAccountUsage)
-	api.GET("/accounts/:id/subscription", h.GetAccountSubscription)
-	api.POST("/accounts/:id/subscription/refresh", h.RefreshAccountSubscription)
-	api.GET("/accounts/:id/auth-json", h.GetAccountAuthJSON)
-	api.PATCH("/accounts/:id/credit", h.UpdateAccountCredit)
 	api.POST("/accounts/batch-test", h.BatchTest)
 	api.POST("/accounts/batch-refresh", h.BatchRefreshAccounts)
 	api.POST("/accounts/batch-refresh-usage", h.BatchRefreshCodexUsage)
-	api.POST("/accounts/batch-delete", h.BatchDeleteAccounts)
 	api.POST("/accounts/batch-update", h.BatchUpdateAccounts)
 	api.POST("/accounts/batch-reset-status", h.BatchResetStatus)
-	api.POST("/accounts/clean-banned", h.CleanBanned)
-	api.POST("/accounts/clean-rate-limited", h.CleanRateLimited)
-	api.POST("/accounts/clean-error", h.CleanError)
-	api.POST("/accounts/grok/clean-banned", h.CleanGrokBanned)
-	api.POST("/accounts/grok/clean-error", h.CleanGrokError)
-	api.POST("/accounts/antigravity/clean-banned", h.CleanAntigravityBanned)
-	api.POST("/accounts/antigravity/clean-error", h.CleanAntigravityError)
+	api.POST("/accounts/batch-delete", h.BatchDeleteAccounts)
 	api.GET("/accounts/export", h.ExportAccounts)
-	api.POST("/accounts/migrate", h.MigrateAccounts)
-	api.GET("/accounts/event-trend", h.GetAccountEventTrend)
-	api.POST("/accounts/usage/probe", h.ForceUsageProbe)
-	api.GET("/usage/stats", h.GetUsageStats)
-	api.GET("/usage/api-keys", h.GetAPIKeyTokenStats)
-	api.GET("/usage/api-keys/:id/accounts", h.GetAPIKeyAccountStats)
 	api.GET("/usage/logs", h.GetUsageLogs)
-	api.GET("/usage/logs/error-summary", h.GetUsageLogsErrorSummary)
-	api.GET("/usage/chart-data", h.GetChartData)
 	api.DELETE("/usage/logs", h.ClearUsageLogs)
-	api.GET("/setup-hints", h.GetSetupHints)
 	api.GET("/keys", h.ListAPIKeys)
-	api.GET("/keys-concurrency", h.GetAPIKeyConcurrency)
 	api.POST("/keys", h.CreateAPIKey)
-	api.POST("/keys/reset-all-quotas", h.ResetAllAPIKeyQuotas)
 	api.PATCH("/keys/:id", h.UpdateAPIKey)
-	api.POST("/keys/:id/reset-quota", h.ResetAPIKeyQuota)
-	api.GET("/keys/:id/scope-usage", h.GetAPIKeyScopeUsage)
-	api.GET("/keys/:id/model-request-usage", h.GetAPIKeyModelRequestUsage)
-	api.GET("/keys-scope-summary", h.GetAPIKeysScopeSummary)
-	api.POST("/keys/:id/scope-quota/reset", h.ResetAPIKeyScopeQuota)
 	api.DELETE("/keys/:id", h.DeleteAPIKey)
-	api.GET("/account-groups", h.ListAccountGroups)
-	api.POST("/account-groups", h.CreateAccountGroup)
-	api.PATCH("/account-groups/:id", h.UpdateAccountGroup)
-	api.DELETE("/account-groups/:id", h.DeleteAccountGroup)
 	api.GET("/health", h.GetHealth)
 	api.GET("/runtime-status", h.GetRuntimeStatus)
-	api.GET("/system/update", h.GetSystemUpdate)
-	api.POST("/system/update", h.PerformSystemUpdate)
-	api.GET("/ops/overview", h.GetOpsOverview)
-	api.GET("/ops/runtime-status", h.GetRuntimeStatus)
-	api.GET("/ops/errors", h.GetOpsErrorLogs)
-	api.GET("/ops/errors/export", h.ExportOpsErrorLogs)
-	api.GET("/ops/errors/summary", h.GetOpsErrorSummary)
 	api.GET("/settings", h.GetSettings)
 	api.PUT("/settings", h.UpdateSettings)
 	api.GET("/settings/codex-user-agent/catalog", h.GetCodexUserAgentCatalog)
 	api.POST("/settings/codex-user-agent/preview", h.PreviewCodexUserAgent)
-	api.GET("/settings/claude-config", h.GetClaudeConfig)
-	api.PUT("/settings/claude-config", h.UpdateClaudeConfig)
-	api.POST("/settings/claude-config/cli-version/sync", h.SyncClaudeCLIVersion)
-	api.GET("/settings/observed-instructions", h.GetObservedInstructions)
-	api.GET("/settings/invite-guide", h.GetInviteGuideSettings)
-	api.PUT("/settings/invite-guide", h.UpdateInviteGuideSettings)
-	api.GET("/settings/visible-channels", h.GetVisibleChannelsSettings)
-	api.PUT("/settings/visible-channels", h.UpdateVisibleChannelsSettings)
-	api.GET("/settings/channel-tests", h.GetChannelTestSettings)
-	api.PUT("/settings/channel-tests", h.UpdateChannelTestSettings)
-	api.GET("/settings/antigravity", h.GetAntigravitySettings)
-	api.PUT("/settings/antigravity", h.UpdateAntigravitySettings)
-	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
-	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
-	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
-	api.GET("/prompt-filter/logs/match", h.MatchPromptFilterLog)
-	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
-	api.GET("/prompt-filter/retention", h.GetPromptLogRetention)
-	api.PUT("/prompt-filter/retention", h.UpdatePromptLogRetention)
-	api.POST("/prompt-filter/retention/run", h.RunPromptLogRetentionNow)
-	api.GET("/prompt-policy/incidents", h.ListPromptPolicyIncidents)
-	api.DELETE("/prompt-policy/incidents", h.ClearPromptPolicyIncidents)
-	api.DELETE("/prompt-policy/incidents/:incident_id", h.DeletePromptPolicyIncident)
-	api.GET("/prompt-policy/incidents/health", h.GetPromptPolicyAuditHealth)
-	api.GET("/prompt-policy/incidents/:incident_id", h.GetPromptPolicyIncident)
-	api.GET("/prompt-policy/risk-profiles", h.ListPromptRiskProfiles)
-	api.GET("/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
-	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.UpsertPromptRiskTrustPolicy)
-	api.DELETE("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.RevokePromptRiskTrustPolicy)
-	api.POST("/prompt-policy/conversation-locks/:lock_key/unlock", h.UnlockPromptConversation)
-	api.POST("/prompt-filter/test", h.TestPromptFilter)
-	api.GET("/prompt-filter/review/keys", h.ListPromptReviewAPIKeys)
-	api.DELETE("/prompt-filter/review/keys/:key_id", h.DeletePromptReviewAPIKey)
-	api.GET("/prompt-filter/review/profiles", h.ListPromptReviewProfiles)
-	api.POST("/prompt-filter/review/profiles", h.SavePromptReviewProfile)
-	api.POST("/prompt-filter/review/profiles/:profile_id/activate", h.ActivatePromptReviewProfile)
-	api.DELETE("/prompt-filter/review/profiles/:profile_id", h.DeletePromptReviewProfile)
-	api.POST("/prompt-filter/review/test", h.TestPromptReviewConnection)
-	api.POST("/prompt-filter/review/models", h.ListPromptReviewModels)
-	api.POST("/prompt-filter/rules/test", h.TestPromptFilterRulePattern)
-	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
-	api.GET("/prompt-filter/newapi-bindings", h.ListPromptFilterNewAPIBindings)
-	api.POST("/prompt-filter/newapi-bindings", h.CreatePromptFilterNewAPIBinding)
-	api.GET("/prompt-filter/newapi-bindings/:api_key_id", h.GetPromptFilterNewAPIBinding)
-	api.PATCH("/prompt-filter/newapi-bindings/:api_key_id", h.UpdatePromptFilterNewAPIBinding)
-	api.POST("/prompt-filter/newapi-bindings/:api_key_id/secret/generate", h.GeneratePromptFilterNewAPIBindingSecret)
-	api.PUT("/prompt-filter/newapi-bindings/:api_key_id/secret", h.ReplacePromptFilterNewAPIBindingSecret)
-	api.DELETE("/prompt-filter/newapi-bindings/:api_key_id", h.DeletePromptFilterNewAPIBinding)
-	api.POST("/prompt-filter/intelligence/run", h.RunPromptIntelligence)
-	api.GET("/prompt-filter/intelligence/history", h.ListPromptIntelligenceHistory)
-	api.GET("/prompt-filter/intelligence/candidates", h.ListPromptIntelligenceCandidates)
-	api.GET("/prompt-filter/intelligence/ai-providers", h.GetPromptIntelligenceAIProviders)
-	api.GET("/prompt-filter/intelligence/candidates/:id/evidence", h.GetPromptIntelligenceCandidateEvidence)
-	api.POST("/prompt-filter/intelligence/candidates/:id/analyze", h.AnalyzePromptIntelligenceCandidate)
-	api.POST("/prompt-filter/intelligence/candidates/:id/identity-updates/:evidence_id/apply", h.ApplyPromptIntelligenceIdentityUpdate)
-	api.POST("/prompt-filter/intelligence/candidates/:id/identity-updates/:evidence_id/rollback", h.RollbackPromptIntelligenceIdentityUpdate)
-	api.POST("/prompt-filter/intelligence/candidates/:id/draft", h.CreatePromptIntelligenceCandidateDraft)
-	api.POST("/prompt-filter/intelligence/candidates/:id/draft/suggest", h.SuggestPromptIntelligenceCandidateDraft)
-	api.POST("/prompt-filter/intelligence/candidates/:id/publish", h.PublishPromptIntelligenceCandidate)
-	api.POST("/prompt-filter/intelligence/candidates/:id/dismiss", h.DismissPromptIntelligenceCandidate)
 	api.GET("/models", h.ListModels)
-	api.POST("/models/sync", h.SyncModels)
-	api.POST("/models/refresh-all", h.RefreshAllModels)
 	api.POST("/codex-cli-version/sync", h.SyncCodexCLIVersion)
 	api.POST("/codex-client-versions/sync", h.SyncCodexClientVersions)
-	api.GET("/model-pricing", h.ListModelPricing)
-	api.PUT("/model-pricing", h.UpdateModelPricing)
-	api.POST("/model-pricing/sync", h.SyncModelPricing)
-	api.PUT("/model-pricing/official-sync/config", h.UpdateOfficialPricingSyncConfig)
-	api.POST("/model-pricing/official-sync", h.SyncOfficialPricingNow)
-	api.GET("/image-prompts", h.ListImagePromptTemplates)
-	api.POST("/image-prompts", h.CreateImagePromptTemplate)
-	api.PATCH("/image-prompts/:id", h.UpdateImagePromptTemplate)
-	api.DELETE("/image-prompts/:id", h.DeleteImagePromptTemplate)
-	api.POST("/images/jobs", h.CreateImageGenerationJob)
-	api.POST("/images/edit-jobs", h.CreateImageEditJob)
-	api.GET("/images/jobs", h.ListImageGenerationJobs)
-	api.GET("/images/jobs/:id", h.GetImageGenerationJob)
-	api.DELETE("/images/jobs/:id", h.DeleteImageGenerationJob)
-	api.GET("/images/assets", h.ListImageAssets)
-	api.GET("/images/assets/:id/file", h.GetImageAssetFile)
-	api.DELETE("/images/assets/:id", h.DeleteImageAsset)
 	api.GET("/proxies", h.ListProxies)
 	api.POST("/proxies", h.AddProxies)
 	api.DELETE("/proxies/:id", h.DeleteProxy)
@@ -1383,23 +1115,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/proxies/test", h.TestProxy)
 	api.POST("/proxies/test-all", h.TestAllProxies)
 	api.POST("/proxies/auto-balance", h.AutoBalanceProxies)
-	api.GET("/proxy-risk-scoring/profiles", h.ListProxyRiskScoringProfiles)
-	api.POST("/proxy-risk-scoring/profiles", h.CreateProxyRiskScoringProfile)
-	api.PATCH("/proxy-risk-scoring/profiles/:profile_id", h.UpdateProxyRiskScoringProfile)
-	api.DELETE("/proxy-risk-scoring/profiles/:profile_id", h.DeleteProxyRiskScoringProfile)
-	api.POST("/proxy-risk-scoring/profiles/:profile_id/test", h.TestProxyRiskScoringProfile)
-	api.POST("/proxies/risk-score", h.StartProxyRiskScoringJob)
-	api.GET("/proxies/risk-score/jobs/:job_id", h.GetProxyRiskScoringJob)
-	api.POST("/proxies/risk-score/jobs/:job_id/cancel", h.CancelProxyRiskScoringJob)
-	api.GET("/proxies/:id/risk-score", h.GetProxyRiskScore)
-	api.GET("/proxies/:id/risk-score/history", h.ListProxyRiskScoreHistory)
-
-	// OAuth 授权流程
 	api.POST("/oauth/generate-auth-url", h.GenerateOAuthURL)
 	api.POST("/oauth/exchange-code", h.ExchangeOAuthCode)
 	api.GET("/oauth/poll-callback", h.PollOAuthCallback)
-
-	// OAuth 回调端点（无需 admin 鉴权，供 OpenAI 重定向调用）
 	r.GET("/auth/callback", h.OAuthCallback)
 }
 
@@ -2919,61 +2637,8 @@ func normalizeCustomHeaders(headers map[string]string) (map[string]string, error
 	return out, nil
 }
 
-func normalizeAccountModelMapping(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-
-	dec := json.NewDecoder(strings.NewReader(raw))
-	dec.UseNumber()
-	tok, err := dec.Token()
-	if err != nil {
-		return "", fmt.Errorf("模型映射必须是 JSON 对象")
-	}
-	delim, ok := tok.(json.Delim)
-	if !ok || delim != '{' {
-		return "", fmt.Errorf("模型映射必须是 JSON 对象")
-	}
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return "", fmt.Errorf("模型映射格式错误")
-		}
-		key, ok := keyTok.(string)
-		if !ok || strings.TrimSpace(key) == "" {
-			return "", fmt.Errorf("模型映射的源模型不能为空")
-		}
-		// 源模型别名会进入 /v1/models 响应、模型校验和使用日志，
-		// 必须与 models 列表同标准校验，防止任意字符串注入。
-		if err := security.ValidateModelName(strings.TrimSpace(key)); err != nil {
-			return "", fmt.Errorf("模型映射的源模型 %q 无效: %w", key, err)
-		}
-		var value string
-		if err := dec.Decode(&value); err != nil {
-			return "", fmt.Errorf("模型映射的目标模型必须是字符串")
-		}
-		if strings.TrimSpace(value) == "" {
-			return "", fmt.Errorf("模型映射的目标模型不能为空")
-		}
-		if err := security.ValidateModelName(strings.TrimSpace(value)); err != nil {
-			return "", fmt.Errorf("模型映射的目标模型 %q 无效: %w", value, err)
-		}
-	}
-	endTok, err := dec.Token()
-	if err != nil {
-		return "", fmt.Errorf("模型映射格式错误")
-	}
-	end, ok := endTok.(json.Delim)
-	if !ok || end != '}' {
-		return "", fmt.Errorf("模型映射格式错误")
-	}
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		return "", fmt.Errorf("模型映射只能包含一个 JSON 对象")
-	}
-	return raw, nil
-}
+// 源模型别名会进入 /v1/models 响应、模型校验和使用日志，
+// 必须与 models 列表同标准校验，防止任意字符串注入。
 
 func isValidHeaderName(name string) bool {
 	for i := 0; i < len(name); i++ {
@@ -3852,6 +3517,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 
 // addATAccountReq AT 模式添加账号请求
 type addATAccountReq struct {
+	SkipRefresh    bool              `json:"skip_refresh"`
 	Name           string            `json:"name"`
 	AccessToken    string            `json:"access_token"`
 	ProxyURL       string            `json:"proxy_url"`
@@ -4026,7 +3692,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		log.Printf("AT 账号 %d 已加入号池 (id=%d, email=%s)", i+1, id, newAcc.Email)
 	}
 	h.db.BatchInsertAccountEventsAsync(createdIDs.snapshot(), "added", "manual_at")
-	h.commitImportedRuntimeAccounts(pending, "manual_at", false)
+	h.commitImportedRuntimeAccounts(pending, "manual_at", req.SkipRefresh)
 
 	security.SecurityAuditLog("AT_ACCOUNTS_ADDED", fmt.Sprintf("success=%d updated=%d duplicate=%d failed=%d ip=%s", successCount, updatedCount, duplicateCount, failCount, c.ClientIP()))
 
@@ -4155,7 +3821,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 		progress(i + 1)
 	}
 	h.db.BatchInsertAccountEventsAsync(createdIDs.snapshot(), "added", "manual_at")
-	h.commitImportedRuntimeAccounts(pending, "manual_at", false)
+	h.commitImportedRuntimeAccounts(pending, "manual_at", req.SkipRefresh)
 
 	security.SecurityAuditLog("AT_ACCOUNTS_ADDED", fmt.Sprintf("success=%d updated=%d duplicate=%d failed=%d ip=%s", successCount, updatedCount, duplicateCount, failCount, c.ClientIP()))
 	// 绑定必须在 complete 事件之前完成：前端收到 complete 就会刷新列表。
@@ -4194,437 +3860,8 @@ type fetchOpenAIResponsesModelsReq struct {
 	CustomHeaders map[string]string `json:"custom_headers"`
 }
 
-func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
-	var req addOpenAIResponsesAccountReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-
-	req.Name = security.SanitizeInput(req.Name)
-	req.ProxyURL = security.SanitizeInput(req.ProxyURL)
-	req.APIKey = strings.TrimSpace(req.APIKey)
-	baseURL, err := auth.NormalizeOpenAIResponsesBaseURL(req.BaseURL)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	balanceQueryURL, err := normalizeOpenAIResponsesBalanceQueryURL(req.BalanceQueryURL)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	models := auth.NormalizeOpenAIResponsesModels(req.Models)
-
-	if req.APIKey == "" {
-		writeError(c, http.StatusBadRequest, "API Key 是必填字段")
-		return
-	}
-	if len(models) == 0 {
-		writeError(c, http.StatusBadRequest, "至少需要添加一个模型")
-		return
-	}
-	if security.ContainsXSS(req.Name) || security.ContainsSQLInjection(req.Name) {
-		writeError(c, http.StatusBadRequest, "名称包含非法字符")
-		return
-	}
-	if utf8.RuneCountInString(req.Name) > 100 {
-		writeError(c, http.StatusBadRequest, "名称长度不能超过100字符")
-		return
-	}
-	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
-		writeError(c, http.StatusBadRequest, "代理URL无效")
-		return
-	}
-	customHeaders, err := normalizeCustomHeaders(req.CustomHeaders)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	modelMapping, err := normalizeAccountModelMapping(req.ModelMapping)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	codexClientMetadataMode := auth.CodexClientMetadataModeAuto
-	if req.CodexClientMetadataMode != nil {
-		if !auth.IsValidCodexClientMetadataMode(*req.CodexClientMetadataMode) {
-			writeError(c, http.StatusBadRequest, "codex_client_metadata_mode 必须是 auto、always 或 off")
-			return
-		}
-		codexClientMetadataMode = auth.NormalizeCodexClientMetadataMode(*req.CodexClientMetadataMode)
-	}
-	codexPassthroughMode := auth.CodexPassthroughModeOff
-	if req.CodexPassthroughMode != nil {
-		if !auth.IsValidCodexPassthroughMode(*req.CodexPassthroughMode) {
-			writeError(c, http.StatusBadRequest, "codex_passthrough_mode 必须是 off、auto 或 always")
-			return
-		}
-		codexPassthroughMode = auth.NormalizeCodexPassthroughMode(*req.CodexPassthroughMode)
-	}
-	responsesUpstreamTransport := auth.OpenAIResponsesTransportHTTP
-	if req.ResponsesUpstreamTransport != nil {
-		if !auth.IsValidOpenAIResponsesUpstreamTransport(*req.ResponsesUpstreamTransport) {
-			writeError(c, http.StatusBadRequest, "responses_upstream_transport 必须是 http 或 websocket")
-			return
-		}
-		responsesUpstreamTransport = auth.NormalizeOpenAIResponsesUpstreamTransport(*req.ResponsesUpstreamTransport)
-	}
-	for _, model := range models {
-		if err := security.ValidateModelName(model); err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
-			return
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
-	defer cancel()
-
-	existing, err := h.db.GetAllOpenAIAPIKeys(ctx)
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if existing[req.APIKey] {
-		writeError(c, http.StatusConflict, "该 API Key 已存在")
-		return
-	}
-
-	name := req.Name
-	if name == "" {
-		name = "openai-responses"
-	}
-	credentials := map[string]interface{}{
-		"upstream_type":                          auth.UpstreamOpenAIResponses,
-		"base_url":                               baseURL,
-		"api_key":                                req.APIKey,
-		openAIResponsesBalanceQueryURLCredential: balanceQueryURL,
-		"models":                                 models,
-		"model_mapping":                          modelMapping,
-		"codex_client_metadata_mode":             codexClientMetadataMode,
-		"codex_passthrough_mode":                 codexPassthroughMode,
-		"responses_upstream_transport":           responsesUpstreamTransport,
-		"plan_type":                              "api",
-		"email":                                  baseURL,
-	}
-	if len(customHeaders) > 0 {
-		credentials["custom_headers"] = cloneCustomHeaders(customHeaders)
-	}
-	id, err := h.db.InsertOpenAIResponsesAccount(ctx, name, credentials, req.ProxyURL)
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	h.db.InsertAccountEventAsync(id, "added", "manual_openai_responses")
-
-	h.store.AddAccount(&auth.Account{
-		DBID:                       id,
-		ProxyURL:                   req.ProxyURL,
-		HealthTier:                 auth.HealthTierHealthy,
-		UpstreamType:               auth.UpstreamOpenAIResponses,
-		BaseURL:                    baseURL,
-		APIKey:                     req.APIKey,
-		Models:                     models,
-		ModelMapping:               modelMapping,
-		CodexClientMetadataMode:    codexClientMetadataMode,
-		CodexPassthroughMode:       codexPassthroughMode,
-		ResponsesUpstreamTransport: responsesUpstreamTransport,
-		CustomHeaders:              customHeaders,
-		Email:                      baseURL,
-		PlanType:                   "api",
-	})
-
-	security.SecurityAuditLog("OPENAI_RESPONSES_ACCOUNT_ADDED", fmt.Sprintf("account_id=%d models=%d ip=%s", id, len(models), c.ClientIP()))
-	c.JSON(http.StatusOK, gin.H{
-		"message": "成功添加 OpenAI Responses API 账号",
-		"id":      id,
-	})
-}
-
-func (h *Handler) FetchOpenAIResponsesModels(c *gin.Context) {
-	var req fetchOpenAIResponsesModelsReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-
-	req.APIKey = strings.TrimSpace(req.APIKey)
-	req.ProxyURL = security.SanitizeInput(req.ProxyURL)
-	if req.AccountID > 0 && req.APIKey == "" {
-		row, err := h.db.GetAccountByID(c.Request.Context(), req.AccountID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeError(c, http.StatusNotFound, "账号不存在")
-				return
-			}
-			writeInternalError(c, err)
-			return
-		}
-		if !strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamOpenAIResponses) {
-			writeError(c, http.StatusBadRequest, "仅 OpenAI Responses API 账号支持使用已保存的 API Key 获取模型")
-			return
-		}
-		req.APIKey = row.GetCredential("api_key")
-		if strings.TrimSpace(req.BaseURL) == "" {
-			req.BaseURL = row.GetCredential("base_url")
-		}
-		if strings.TrimSpace(req.ProxyURL) == "" {
-			req.ProxyURL = row.ProxyURL
-		}
-		if len(req.CustomHeaders) == 0 {
-			req.CustomHeaders = row.GetCredentialStringMap("custom_headers")
-		}
-	}
-	baseURL, err := auth.NormalizeOpenAIResponsesBaseURL(req.BaseURL)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	if req.APIKey == "" {
-		writeError(c, http.StatusBadRequest, "API Key 是必填字段")
-		return
-	}
-	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
-		writeError(c, http.StatusBadRequest, "代理URL无效")
-		return
-	}
-	customHeaders, err := normalizeCustomHeaders(req.CustomHeaders)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
-	defer cancel()
-	// 编辑已有账号时带上账号本身：号池画像按账号抽取，统一身份开关下与该账号的
-	// 对话请求取同一份身份（issue #774）；新建账号尚未落库，为空。
-	var account *auth.Account
-	if req.AccountID > 0 && h.store != nil {
-		account = h.store.FindByID(req.AccountID)
-	}
-	models, err := fetchOpenAIResponsesModelIDs(ctx, account, baseURL, req.APIKey, req.ProxyURL, customHeaders)
-	if err != nil {
-		writeError(c, http.StatusBadGateway, err.Error())
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"models":   models,
-		"base_url": baseURL,
-	})
-}
-
-func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "无效的账号 ID")
-		return
-	}
-
-	var req addOpenAIResponsesAccountReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-	req.Name = security.SanitizeInput(req.Name)
-	req.ProxyURL = security.SanitizeInput(req.ProxyURL)
-	req.APIKey = strings.TrimSpace(req.APIKey)
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
-	defer cancel()
-	row, err := h.db.GetAccountByID(ctx, id)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(c, http.StatusNotFound, "账号不存在")
-			return
-		}
-		writeInternalError(c, err)
-		return
-	}
-	if !strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamOpenAIResponses) {
-		writeError(c, http.StatusBadRequest, "仅 OpenAI Responses API 账号支持账号设置")
-		return
-	}
-
-	baseURL, err := auth.NormalizeOpenAIResponsesBaseURL(req.BaseURL)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	balanceQueryURL, err := normalizeOpenAIResponsesBalanceQueryURL(req.BalanceQueryURL)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	models := auth.NormalizeOpenAIResponsesModels(req.Models)
-	if len(models) == 0 {
-		writeError(c, http.StatusBadRequest, "至少需要添加一个模型")
-		return
-	}
-	if security.ContainsXSS(req.Name) || security.ContainsSQLInjection(req.Name) {
-		writeError(c, http.StatusBadRequest, "名称包含非法字符")
-		return
-	}
-	if utf8.RuneCountInString(req.Name) > 100 {
-		writeError(c, http.StatusBadRequest, "名称长度不能超过100字符")
-		return
-	}
-	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
-		writeError(c, http.StatusBadRequest, "代理URL无效")
-		return
-	}
-	customHeaders, err := normalizeCustomHeaders(req.CustomHeaders)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	modelMapping, err := normalizeAccountModelMapping(req.ModelMapping)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	codexClientMetadataMode := auth.NormalizeCodexClientMetadataMode(row.GetCredential("codex_client_metadata_mode"))
-	if req.CodexClientMetadataMode != nil {
-		if !auth.IsValidCodexClientMetadataMode(*req.CodexClientMetadataMode) {
-			writeError(c, http.StatusBadRequest, "codex_client_metadata_mode 必须是 auto、always 或 off")
-			return
-		}
-		codexClientMetadataMode = auth.NormalizeCodexClientMetadataMode(*req.CodexClientMetadataMode)
-	}
-	codexPassthroughMode := auth.NormalizeCodexPassthroughMode(row.GetCredential("codex_passthrough_mode"))
-	if req.CodexPassthroughMode != nil {
-		if !auth.IsValidCodexPassthroughMode(*req.CodexPassthroughMode) {
-			writeError(c, http.StatusBadRequest, "codex_passthrough_mode 必须是 off、auto 或 always")
-			return
-		}
-		codexPassthroughMode = auth.NormalizeCodexPassthroughMode(*req.CodexPassthroughMode)
-	}
-	responsesUpstreamTransport := auth.NormalizeOpenAIResponsesUpstreamTransport(row.GetCredential(auth.OpenAIResponsesUpstreamTransportCredentialKey))
-	if req.ResponsesUpstreamTransport != nil {
-		if !auth.IsValidOpenAIResponsesUpstreamTransport(*req.ResponsesUpstreamTransport) {
-			writeError(c, http.StatusBadRequest, "responses_upstream_transport 必须是 http 或 websocket")
-			return
-		}
-		responsesUpstreamTransport = auth.NormalizeOpenAIResponsesUpstreamTransport(*req.ResponsesUpstreamTransport)
-	}
-	for _, model := range models {
-		if err := security.ValidateModelName(model); err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
-			return
-		}
-	}
-
-	name := req.Name
-	if name == "" {
-		name = row.Name
-	}
-	if name == "" {
-		name = "openai-responses"
-	}
-
-	credentials := map[string]interface{}{
-		"upstream_type":                          auth.UpstreamOpenAIResponses,
-		"base_url":                               baseURL,
-		openAIResponsesBalanceQueryURLCredential: balanceQueryURL,
-		"models":                                 models,
-		"model_mapping":                          modelMapping,
-		"codex_client_metadata_mode":             codexClientMetadataMode,
-		"codex_passthrough_mode":                 codexPassthroughMode,
-		"responses_upstream_transport":           responsesUpstreamTransport,
-		"plan_type":                              "api",
-		"email":                                  baseURL,
-		"custom_headers":                         cloneCustomHeaders(customHeaders),
-	}
-	if req.APIKey != "" {
-		credentials["api_key"] = req.APIKey
-	}
-	if req.APIKey == "" && strings.TrimSpace(row.GetCredential("api_key")) == "" {
-		writeError(c, http.StatusBadRequest, "API Key 是必填字段")
-		return
-	}
-
-	if err := h.db.UpdateOpenAIResponsesAccount(ctx, id, name, credentials, req.ProxyURL); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(c, http.StatusNotFound, "账号不存在")
-			return
-		}
-		writeInternalError(c, err)
-		return
-	}
-	if h.store != nil {
-		h.store.ApplyOpenAIResponsesConfig(id, baseURL, req.APIKey, models, modelMapping, codexClientMetadataMode, codexPassthroughMode, req.ProxyURL)
-		h.store.ApplyAccountCustomHeaders(id, customHeaders)
-	}
-	h.db.InsertAccountEventAsync(id, "updated", "manual_openai_responses")
-
-	writeMessage(c, http.StatusOK, "OpenAI Responses API 账号设置已更新")
-}
-
-func fetchOpenAIResponsesModelIDs(ctx context.Context, account *auth.Account, baseURL, apiKey, proxyURL string, customHeaders map[string]string) ([]string, error) {
-	endpoint := auth.OpenAIResponsesEndpoint(baseURL, "/v1/models")
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	transport.DialContext = baseDialer.DialContext
-	if err := auth.ConfigureTransportProxy(transport, proxyURL, baseDialer); err != nil {
-		return nil, fmt.Errorf("代理URL无效: %w", err)
-	}
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   20 * time.Second,
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("创建模型列表请求失败: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Accept", "application/json")
-	proxy.ApplyCodexModelDiscoveryHeaders(req.Header, account, baseURL, apiKey)
-	for name, value := range customHeaders {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		req.Header.Set(name, value)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求 /v1/models 失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, readErr := proxy.ReadModelsListBody(resp.Body, proxy.CurrentRuntimeSettings().ModelsListReadMaxBytes)
-	if readErr != nil {
-		return nil, fmt.Errorf("读取 /v1/models 响应失败: %w", readErr)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		message := strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
-		if message == "" {
-			message = strings.TrimSpace(string(body))
-		}
-		if message == "" {
-			message = http.StatusText(resp.StatusCode)
-		}
-		return nil, fmt.Errorf("/v1/models 返回 %d: %s", resp.StatusCode, message)
-	}
-
-	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("解析 /v1/models 响应失败: %w", err)
-	}
-	models := make([]string, 0, len(payload.Data))
-	for _, item := range payload.Data {
-		models = append(models, item.ID)
-	}
-	models = auth.NormalizeOpenAIResponsesModels(models)
-	if len(models) == 0 {
-		return nil, fmt.Errorf("/v1/models 未返回可用模型")
-	}
-	return models, nil
-}
+// 编辑已有账号时带上账号本身：号池画像按账号抽取，统一身份开关下与该账号的
+// 对话请求取同一份身份（issue #774）；新建账号尚未落库，为空。
 
 type updateAccountModelsRequest struct {
 	Models []string `json:"models"`
@@ -4813,6 +4050,7 @@ type importToken struct {
 // importSettings 汇总一次导入请求的表单开关。这些开关要穿过"入口 → 4 个格式
 // 解析函数 → importAccountsCommon"三层，继续用位置参数堆叠会越加越长。
 type importSettings struct {
+	skipRefresh bool
 	// defaultProxyURL 是表单里填的代理：文件没带代理、或没开 importProxies 时的兜底。
 	defaultProxyURL string
 	// importProxies 打开后采用文件内携带的代理，并把它们注册进代理池。
@@ -5052,22 +4290,6 @@ func trimUTF8BOM(data []byte) []byte {
 }
 
 // parseImportJSONTokens 同时兼容现有扁平 JSON 和 Sub2Api 顶层对象。
-func parseImportJSONTokens(data []byte) ([]importToken, error) {
-	data = trimUTF8BOM(data)
-	if !json.Valid(data) {
-		return nil, fmt.Errorf("invalid import json")
-	}
-
-	if tokens := parseFlatJSONImportTokens(data); len(tokens) > 0 {
-		return tokens, nil
-	}
-
-	if tokens := parseSub2APIJSONImportTokens(data); len(tokens) > 0 {
-		return tokens, nil
-	}
-
-	return nil, nil
-}
 
 // parseUploadedImportJSONFile 打开上传的 JSON 文件并流式解析,不把整个文件读进
 // 内存。multipart 大文件(>32MB)由 ParseMultipartForm 落在临时文件,fh.Open()
@@ -5234,19 +4456,6 @@ func jsonAccountEntriesToTokens(entries []jsonAccountEntry) []importToken {
 				proxyEnabled:          entry.ProxyEnabled,
 			})
 		}
-	}
-	return tokens
-}
-
-func parseSub2APIJSONImportTokens(data []byte) []importToken {
-	var payload sub2apiImportPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil
-	}
-
-	tokens := make([]importToken, 0, len(payload.Accounts))
-	for _, account := range payload.Accounts {
-		tokens = append(tokens, sub2apiAccountEntryToTokens(account)...)
 	}
 	return tokens
 }
@@ -5434,6 +4643,7 @@ func (h *Handler) ImportAccounts(c *gin.Context) {
 	}
 	settings := importSettings{
 		defaultProxyURL: c.PostForm("proxy_url"),
+		skipRefresh:     parseBoolForm(c.PostForm("skip_refresh")),
 		// TXT 系格式一行一个 token，物理上不可能携带代理。这里忽略开关而不是
 		// 报错，免得前端还要跟着格式切换清理该状态。
 		importProxies:  parseBoolForm(c.PostForm("import_proxy")) && (format == "json" || format == "json_at"),
@@ -6201,7 +5411,9 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 		h.store.AddAccounts(accounts)
 		for _, pending := range pendingRuntime {
 			h.applyImportedAccountUsageState(pending.account, pending.source)
-			h.scheduleImportedAccountWarmup(pending.account, pending.account.DBID, pending.source)
+			if !settings.skipRefresh {
+				h.scheduleImportedAccountWarmup(pending.account, pending.account.DBID, pending.source)
+			}
 		}
 	}
 	close(done)
@@ -7534,154 +6746,20 @@ func (h *Handler) GetHealth(c *gin.Context) {
 
 // GetUsageStats 获取使用统计。
 // 支持可选 query 参数 start/end (RFC3339);未传时回落"今日"行为。
-func (h *Handler) GetUsageStats(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
-	defer cancel()
 
-	rangeStart, rangeEnd, err := parseUsageStatsRange(c.Query("start"), c.Query("end"))
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// 区间卡片跟随用量页的账号/密钥/模型/端点/搜索等筛选(与 /usage/logs 同一套参数);
-	// 状态类参数(status/error_only 等)对统计无意义,解析后被忽略;累计字段始终全局。
-	dim, ok := parseUsageLogsFilter(c, rangeStart, rangeEnd)
-	if !ok {
-		return
-	}
-
-	var stats *database.UsageStats
-	if strings.EqualFold(strings.TrimSpace(c.Query("detail")), "summary") {
-		stats, err = h.getUsageStatsSummaryFilteredCached(ctx, rangeStart, rangeEnd, parseUsageChannel(c), dim)
-	} else {
-		stats, err = h.getUsageStatsFilteredCached(ctx, rangeStart, rangeEnd, parseUsageChannel(c), dim)
-	}
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, stats)
-}
+// 区间卡片跟随用量页的账号/密钥/模型/端点/搜索等筛选(与 /usage/logs 同一套参数);
+// 状态类参数(status/error_only 等)对统计无意义,解析后被忽略;累计字段始终全局。
 
 // parseUsageStatsRange 解析 /usage/stats 的可选 start/end query。
 // 任一为空则当作零值由调用方决定回退行为(默认"今日");两者都填则要求均合法。
-func parseUsageStatsRange(startStr, endStr string) (time.Time, time.Time, error) {
-	startStr = strings.TrimSpace(startStr)
-	endStr = strings.TrimSpace(endStr)
-	var start, end time.Time
-	if startStr != "" {
-		t, err := time.Parse(time.RFC3339, startStr)
-		if err != nil {
-			return time.Time{}, time.Time{}, fmt.Errorf("start 参数格式错误，需要 RFC3339")
-		}
-		start = t
-	}
-	if endStr != "" {
-		t, err := time.Parse(time.RFC3339, endStr)
-		if err != nil {
-			return time.Time{}, time.Time{}, fmt.Errorf("end 参数格式错误，需要 RFC3339")
-		}
-		end = t
-	}
-	if !start.IsZero() && !end.IsZero() && !end.After(start) {
-		return time.Time{}, time.Time{}, fmt.Errorf("end 必须晚于 start")
-	}
-	return start, end, nil
-}
 
 // GetAPIKeyTokenStats 返回按 API Key 聚合的 token 用量列表（issue #162）。
 // 支持可选 query 参数 start/end (RFC3339)；缺省回落到"今日"。
 // 不分页/不限条数：前端做排序、搜索、分页。
-func (h *Handler) GetAPIKeyTokenStats(c *gin.Context) {
-	rangeStart, rangeEnd, err := parseUsageStatsRange(c.Query("start"), c.Query("end"))
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	if !rangeStart.IsZero() && !rangeEnd.IsZero() && rangeEnd.Sub(rangeStart) > 366*24*time.Hour {
-		writeError(c, http.StatusBadRequest, "时间范围不能超过 366 天")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
-	defer cancel()
-
-	cacheKey := fmt.Sprintf("%d:%d", rangeStart.Unix()/30, rangeEnd.Unix()/30)
-	type cachedResponse struct {
-		Items []database.APIKeyTokenStat `json:"items"`
-	}
-	var response cachedResponse
-	if h.getRuntimeJSON(ctx, adminAPIKeyStatsNamespace, cacheKey, &response) {
-		c.JSON(http.StatusOK, response)
-		return
-	}
-
-	items, err := h.db.ListAPIKeyTokenStats(ctx, rangeStart, rangeEnd)
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if items == nil {
-		items = []database.APIKeyTokenStat{}
-	}
-	response.Items = items
-	h.setRuntimeJSON(ctx, adminAPIKeyStatsNamespace, cacheKey, response, adminUsageRangeCacheTTL)
-	c.JSON(http.StatusOK, response)
-}
 
 // GetAPIKeyAccountStats 返回单个 API Key 按上游账号拆分的用量（账号明细"按 Key 分解"的转置视图）。
 // 支持可选 query 参数 start/end (RFC3339)；缺省回落到"今日"。
 // GET /api/admin/usage/api-keys/:id/accounts
-func (h *Handler) GetAPIKeyAccountStats(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "无效的 API Key ID")
-		return
-	}
-
-	rangeStart, rangeEnd, err := parseUsageStatsRange(c.Query("start"), c.Query("end"))
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	if !rangeStart.IsZero() && !rangeEnd.IsZero() && rangeEnd.Sub(rangeStart) > 366*24*time.Hour {
-		writeError(c, http.StatusBadRequest, "时间范围不能超过 366 天")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
-	defer cancel()
-
-	cacheKey := fmt.Sprintf("%d:%d:%d", id, rangeStart.Unix()/30, rangeEnd.Unix()/30)
-	type cachedResponse struct {
-		Items           []database.APIKeyAccountStat     `json:"items"`
-		Groups          []apiKeyAccountGroupUsage        `json:"groups"`
-		Summary         apiKeyAccountUsageSummary        `json:"summary"`
-		Reconciliation  apiKeyAccountUsageReconciliation `json:"reconciliation"`
-		MembershipBasis string                           `json:"membership_basis"`
-	}
-	var response cachedResponse
-	if h.getRuntimeJSON(ctx, adminAPIKeyAccountsNamespace, cacheKey, &response) {
-		c.JSON(http.StatusOK, response)
-		return
-	}
-
-	items, err := h.db.ListAPIKeyAccountStats(ctx, id, rangeStart, rangeEnd)
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if items == nil {
-		items = []database.APIKeyAccountStat{}
-	}
-	response.Items = items
-	response.Groups, response.Summary, response.Reconciliation = aggregateAPIKeyAccountGroups(items)
-	response.MembershipBasis = "current_and_deleted_last_membership"
-	h.setRuntimeJSON(ctx, adminAPIKeyAccountsNamespace, cacheKey, response, adminUsageRangeCacheTTL)
-	c.JSON(http.StatusOK, response)
-}
 
 type apiKeyAccountUsageSummary struct {
 	Accounts      int     `json:"accounts"`
@@ -7714,135 +6792,15 @@ type apiKeyAccountUsageReconciliation struct {
 // the retained last membership for recycle-bin accounts. If an account belongs
 // to multiple groups, its usage is intentionally included in each group; the
 // overall summary remains de-duplicated.
-func aggregateAPIKeyAccountGroups(items []database.APIKeyAccountStat) ([]apiKeyAccountGroupUsage, apiKeyAccountUsageSummary, apiKeyAccountUsageReconciliation) {
-	groupMap := make(map[int64]*apiKeyAccountGroupUsage)
-	summary := apiKeyAccountUsageSummary{Accounts: len(items)}
-	reconciliation := apiKeyAccountUsageReconciliation{}
-	for _, item := range items {
-		summary.Requests += item.Requests
-		summary.TotalTokens += item.TotalTokens
-		summary.AccountBilled += item.AccountBilled
-		summary.UserBilled += item.UserBilled
-		groupCount := len(item.Groups)
-		if groupCount == 0 {
-			reconciliation.Ungrouped.Accounts++
-			reconciliation.Ungrouped.Requests += item.Requests
-			reconciliation.Ungrouped.TotalTokens += item.TotalTokens
-			reconciliation.Ungrouped.AccountBilled += item.AccountBilled
-			reconciliation.Ungrouped.UserBilled += item.UserBilled
-		} else {
-			reconciliation.UniqueGroupedAccounts++
-		}
-		if groupCount > 1 {
-			reconciliation.MultiGroupAccounts++
-			extraAssignments := int64(groupCount - 1)
-			reconciliation.Duplicate.Accounts += groupCount - 1
-			reconciliation.Duplicate.Requests += item.Requests * extraAssignments
-			reconciliation.Duplicate.TotalTokens += item.TotalTokens * extraAssignments
-			reconciliation.Duplicate.AccountBilled += item.AccountBilled * float64(extraAssignments)
-			reconciliation.Duplicate.UserBilled += item.UserBilled * float64(extraAssignments)
-		}
-		for _, group := range item.Groups {
-			total := groupMap[group.ID]
-			if total == nil {
-				total = &apiKeyAccountGroupUsage{ID: group.ID, Name: group.Name, Color: group.Color}
-				groupMap[group.ID] = total
-			}
-			total.Accounts++
-			total.Requests += item.Requests
-			total.TotalTokens += item.TotalTokens
-			total.AccountBilled += item.AccountBilled
-			total.UserBilled += item.UserBilled
-		}
-	}
-	groups := make([]apiKeyAccountGroupUsage, 0, len(groupMap))
-	for _, group := range groupMap {
-		groups = append(groups, *group)
-		reconciliation.GroupedTotal.Accounts += group.Accounts
-		reconciliation.GroupedTotal.Requests += group.Requests
-		reconciliation.GroupedTotal.TotalTokens += group.TotalTokens
-		reconciliation.GroupedTotal.AccountBilled += group.AccountBilled
-		reconciliation.GroupedTotal.UserBilled += group.UserBilled
-	}
-	sort.Slice(groups, func(i, j int) bool {
-		if groups[i].UserBilled == groups[j].UserBilled {
-			return groups[i].TotalTokens > groups[j].TotalTokens
-		}
-		return groups[i].UserBilled > groups[j].UserBilled
-	})
-	return groups, summary, reconciliation
-}
 
 // GetChartData 返回图表聚合数据（服务端分桶 + 内存缓存）
-func (h *Handler) GetChartData(c *gin.Context) {
-	startStr := c.Query("start")
-	endStr := c.Query("end")
-	bucketStr := c.DefaultQuery("bucket_minutes", "5")
 
-	startTime, e1 := time.Parse(time.RFC3339, startStr)
-	endTime, e2 := time.Parse(time.RFC3339, endStr)
-	if e1 != nil || e2 != nil {
-		writeError(c, http.StatusBadRequest, "start/end 参数格式错误，需要 RFC3339 格式")
-		return
-	}
-	bucketMinutes, _ := strconv.Atoi(bucketStr)
-	if bucketMinutes < 1 {
-		bucketMinutes = 5
-	}
+// Canonicalize moving ranges so periodic refreshes reuse the same result.
+// The bucket width itself is the natural cache window for chart data.
 
-	channel := parseUsageChannel(c)
+// 写入缓存
 
-	// Canonicalize moving ranges so periodic refreshes reuse the same result.
-	// The bucket width itself is the natural cache window for chart data.
-	cacheWindow := int64(bucketMinutes * 60)
-	cacheKey := fmt.Sprintf("%d|%d|%d|%s", startTime.Unix()/cacheWindow, endTime.Unix()/cacheWindow, bucketMinutes, channel)
-	h.chartCacheMu.RLock()
-	if entry, ok := h.chartCacheData[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
-		h.chartCacheMu.RUnlock()
-		c.JSON(http.StatusOK, entry.data)
-		return
-	}
-	h.chartCacheMu.RUnlock()
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
-	defer cancel()
-
-	var cached database.ChartAggregation
-	if h.getRuntimeJSON(ctx, adminChartCacheNamespace, cacheKey, &cached) {
-		result := &cached
-		h.chartCacheMu.Lock()
-		h.chartCacheData[cacheKey] = &chartCacheEntry{
-			data:      result,
-			expiresAt: time.Now().Add(adminChartCacheTTL),
-		}
-		h.chartCacheMu.Unlock()
-		c.JSON(http.StatusOK, result)
-		return
-	}
-
-	result, err := h.db.GetChartAggregation(ctx, startTime, endTime, bucketMinutes, channel)
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	h.setRuntimeJSON(ctx, adminChartCacheNamespace, cacheKey, result, adminChartCacheTTL)
-
-	// 写入缓存
-	h.chartCacheMu.Lock()
-	h.chartCacheData[cacheKey] = &chartCacheEntry{
-		data:      result,
-		expiresAt: time.Now().Add(adminChartCacheTTL),
-	}
-	// 清理过期条目（延迟清理，避免内存泄漏）
-	for k, v := range h.chartCacheData {
-		if time.Now().After(v.expiresAt) {
-			delete(h.chartCacheData, k)
-		}
-	}
-	h.chartCacheMu.Unlock()
-
-	c.JSON(http.StatusOK, result)
-}
+// 清理过期条目（延迟清理，避免内存泄漏）
 
 func parseOpsErrorPositiveInt64(c *gin.Context, name string) (*int64, bool) {
 	raw := strings.TrimSpace(c.Query(name))
@@ -9725,230 +8683,12 @@ func normalizeBackgroundImage(value string) (string, error) {
 	}
 }
 
-func backgroundAssetDir() string {
-	if dir := strings.TrimSpace(os.Getenv("BACKGROUND_ASSET_DIR")); dir != "" {
-		return dir
-	}
-	if dir := strings.TrimSpace(os.Getenv("IMAGE_ASSET_DIR")); dir != "" {
-		clean := filepath.Clean(dir)
-		parent := filepath.Dir(clean)
-		if parent != "." && parent != string(os.PathSeparator) {
-			return filepath.Join(parent, "backgrounds")
-		}
-		return filepath.Join(clean, "backgrounds")
-	}
-	if dbPath := strings.TrimSpace(os.Getenv("DATABASE_PATH")); dbPath != "" {
-		return filepath.Join(filepath.Dir(dbPath), "backgrounds")
-	}
-	return defaultBackgroundAssetDir
-}
-
-func backgroundAssetPath(filename string) (string, bool) {
-	name := filepath.Base(strings.TrimSpace(filename))
-	if name == "" || name == "." || name != strings.TrimSpace(filename) {
-		return "", false
-	}
-	dir, err := filepath.Abs(backgroundAssetDir())
-	if err != nil {
-		return "", false
-	}
-	full, err := filepath.Abs(filepath.Join(dir, name))
-	if err != nil {
-		return "", false
-	}
-	rel, err := filepath.Rel(dir, full)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", false
-	}
-	return full, true
-}
-
-func backgroundAssetURL(filename string) string {
-	return backgroundAssetURLPrefix + filename
-}
-
 func validateConnectionTestContent(content string) (string, error) {
 	normalized := auth.NormalizeTestContent(content)
 	if len([]rune(normalized)) > auth.MaxTestContentRunes {
 		return "", fmt.Errorf("test_content 不能超过 %d 个字符", auth.MaxTestContentRunes)
 	}
 	return normalized, nil
-}
-
-func randomBackgroundAssetFilename(ext string) string {
-	ext = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(ext)), ".")
-	if ext == "" {
-		ext = "bin"
-	}
-	b := make([]byte, 10)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%d.%s", time.Now().UnixNano(), ext)
-	}
-	return fmt.Sprintf("%d-%s.%s", time.Now().UnixNano(), hex.EncodeToString(b), ext)
-}
-
-func declaredBackgroundMediaType(filename, contentType string) string {
-	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
-	switch contentType {
-	case "image/png", "image/jpeg", "image/jpg", "image/webp", "image/svg+xml", "video/mp4":
-		if contentType == "image/jpg" {
-			return "image/jpeg"
-		}
-		return contentType
-	}
-	switch strings.ToLower(filepath.Ext(filename)) {
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".webp":
-		return "image/webp"
-	case ".svg":
-		return "image/svg+xml"
-	case ".mp4":
-		return "video/mp4"
-	default:
-		if byExt := mime.TypeByExtension(strings.ToLower(filepath.Ext(filename))); byExt != "" {
-			return strings.ToLower(strings.TrimSpace(strings.Split(byExt, ";")[0]))
-		}
-		return ""
-	}
-}
-
-func looksLikeSVG(data []byte) bool {
-	sample := strings.ToLower(string(data))
-	return strings.Contains(sample, "<svg") && !strings.Contains(sample, "<script")
-}
-
-func looksLikeWebP(data []byte) bool {
-	return len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
-}
-
-func looksLikeMP4(data []byte) bool {
-	return len(data) >= 12 && string(data[4:8]) == "ftyp"
-}
-
-func normalizeBackgroundUploadMedia(filename, contentType string, data []byte) (string, string, error) {
-	if len(data) == 0 {
-		return "", "", fmt.Errorf("背景文件为空")
-	}
-	declared := declaredBackgroundMediaType(filename, contentType)
-	detected := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(data), ";")[0]))
-	switch detected {
-	case "image/png":
-		return "image/png", "png", nil
-	case "image/jpeg":
-		return "image/jpeg", "jpg", nil
-	case "image/webp":
-		return "image/webp", "webp", nil
-	}
-	switch declared {
-	case "image/webp":
-		if looksLikeWebP(data) {
-			return "image/webp", "webp", nil
-		}
-	case "image/svg+xml":
-		if looksLikeSVG(data) {
-			return "image/svg+xml", "svg", nil
-		}
-	case "video/mp4":
-		if looksLikeMP4(data) {
-			return "video/mp4", "mp4", nil
-		}
-	}
-	return "", "", fmt.Errorf("背景仅支持 PNG、JPG、WebP、SVG 或 MP4")
-}
-
-func backgroundUploadLimitBytes(mimeType string) int {
-	if mimeType == "video/mp4" {
-		return maxBackgroundVideoAssetUploadBytes
-	}
-	return maxBackgroundImageAssetUploadBytes
-}
-
-func backgroundUploadTooLargeMessage(mimeType string) string {
-	if mimeType == "video/mp4" {
-		return "MP4 动态壁纸不能超过 40MB"
-	}
-	return "背景图片不能超过 20MB"
-}
-
-func (h *Handler) UploadBackgroundAsset(c *gin.Context) {
-	fh, err := c.FormFile("file")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "请选择背景文件")
-		return
-	}
-	if fh.Size <= 0 {
-		writeError(c, http.StatusBadRequest, "背景文件为空")
-		return
-	}
-	if fh.Size > maxBackgroundAssetUploadBytes {
-		writeError(c, http.StatusBadRequest, "背景文件不能超过 40MB")
-		return
-	}
-	file, err := fh.Open()
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(io.LimitReader(file, maxBackgroundAssetUploadBytes+1))
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if len(data) > maxBackgroundAssetUploadBytes {
-		writeError(c, http.StatusBadRequest, "背景文件不能超过 40MB")
-		return
-	}
-	mimeType, ext, err := normalizeBackgroundUploadMedia(fh.Filename, fh.Header.Get("Content-Type"), data)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	if len(data) > backgroundUploadLimitBytes(mimeType) {
-		writeError(c, http.StatusBadRequest, backgroundUploadTooLargeMessage(mimeType))
-		return
-	}
-
-	if err := os.MkdirAll(backgroundAssetDir(), 0o755); err != nil {
-		writeInternalError(c, fmt.Errorf("创建背景目录失败: %w", err))
-		return
-	}
-	filename := randomBackgroundAssetFilename(ext)
-	fullPath, ok := backgroundAssetPath(filename)
-	if !ok {
-		writeInternalError(c, fmt.Errorf("背景文件路径无效"))
-		return
-	}
-	if err := os.WriteFile(fullPath, data, 0o644); err != nil {
-		writeInternalError(c, fmt.Errorf("保存背景文件失败: %w", err))
-		return
-	}
-
-	c.JSON(http.StatusOK, backgroundAssetUploadResponse{
-		URL:      backgroundAssetURL(filename),
-		Filename: filename,
-		MimeType: mimeType,
-		Bytes:    len(data),
-	})
-}
-
-func (h *Handler) GetBackgroundAssetFile(c *gin.Context) {
-	fullPath, ok := backgroundAssetPath(c.Param("filename"))
-	if !ok {
-		writeError(c, http.StatusNotFound, "背景文件不存在")
-		return
-	}
-	info, err := os.Stat(fullPath)
-	if err != nil || info.IsDir() {
-		writeError(c, http.StatusNotFound, "背景文件不存在")
-		return
-	}
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
-	c.File(fullPath)
 }
 
 func normalizeBackgroundOpacity(value int) int {
@@ -10156,24 +8896,10 @@ func brandingFromSettings(settings *database.SystemSettings) brandingResponse {
 }
 
 // GetBranding 获取公开站点品牌配置（无需管理密钥）。
-func (h *Handler) GetBranding(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-	defer cancel()
-	settings, err := h.db.GetSystemSettings(ctx)
-	if err != nil {
-		log.Printf("读取站点品牌配置失败: %v", err)
-		c.JSON(http.StatusOK, brandingFromSettings(nil))
-		return
-	}
-	c.JSON(http.StatusOK, brandingFromSettings(settings))
-}
 
 // GetSettings 获取当前系统设置
 // GetObservedInstructions 返回最近观测到的客户端透传 instructions 样本，
 // 供管理端在配置 payload 重写规则时查看客户端实际发来的系统提示词原文。
-func (h *Handler) GetObservedInstructions(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"samples": proxy.ObservedInstructions()})
-}
 
 func (h *Handler) GetSettings(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
@@ -10239,7 +8965,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	}
 	modelCooldownSettings := h.store.GetModelCooldownSettings()
 	continuousRetryPolicy := h.store.GetContinuousRetryPolicy()
-	c.JSON(http.StatusOK, settingsResponse{
+	h.writeCoreSettingsResponse(c, http.StatusOK, settingsResponse{
 		antigravityOAuthSettingsView:        currentAntigravityOAuthSettingsView(),
 		SiteName:                            branding.SiteName,
 		SiteLogo:                            branding.SiteLogo,
@@ -12147,7 +10873,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	modelCooldownSettings := h.store.GetModelCooldownSettings()
 
-	c.JSON(http.StatusOK, settingsResponse{
+	h.writeCoreSettingsResponse(c, http.StatusOK, settingsResponse{
 		antigravityOAuthSettingsView:        currentAntigravityOAuthSettingsView(),
 		SiteName:                            siteName,
 		SiteLogo:                            siteLogo,
@@ -12348,39 +11074,6 @@ type testImageStorageReq struct {
 
 // TestImageStorageConnection 用提交的字段临时构造一次 S3Backend，调用 HeadBucket 验证可达性。
 // 不修改任何持久化状态，便于"保存前先点测试连接"。
-func (h *Handler) TestImageStorageConnection(c *gin.Context) {
-	var req testImageStorageReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-	cfg := imagestore.Config{
-		Backend:        imagestore.BackendS3,
-		Endpoint:       req.Endpoint,
-		Region:         req.Region,
-		Bucket:         req.Bucket,
-		AccessKey:      req.AccessKey,
-		SecretKey:      req.SecretKey,
-		Prefix:         req.Prefix,
-		ForcePathStyle: req.ForcePathStyle,
-	}.Normalize()
-	if err := cfg.Validate(); err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	backend, err := imagestore.NewS3Backend(cfg)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
-	defer cancel()
-	if err := backend.HeadBucket(ctx); err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "bucket": cfg.Bucket})
-}
 
 // ==================== 导出 & 迁移 ====================
 
@@ -12700,98 +11393,10 @@ type migrateReq struct {
 }
 
 // MigrateAccounts 从远程 codex2api 实例迁移健康账号（SSE 流式进度）
-func (h *Handler) MigrateAccounts(c *gin.Context) {
-	if !h.hasConfiguredAdminSecret(c.Request.Context()) {
-		writeError(c, http.StatusForbidden, "请先设置管理密钥，再使用远程迁移")
-		return
-	}
 
-	var req migrateReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-	if req.URL == "" || req.AdminKey == "" {
-		writeError(c, http.StatusBadRequest, "url 和 admin_key 是必填字段")
-		return
-	}
-	parsedURL, err := url.Parse(strings.TrimSpace(req.URL))
-	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		writeError(c, http.StatusBadRequest, "url 必须是完整的 http/https 地址")
-		return
-	}
+// 转换为 importToken 格式，复用 importAccountsCommon (原生支持 AT-only 混合导入)
 
-	remoteURL := strings.TrimRight(parsedURL.String(), "/")
-	exportURL := remoteURL + "/api/admin/accounts/export?filter=healthy&remote=true"
-
-	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer fetchCancel()
-
-	httpReq, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, exportURL, nil)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "构建请求失败: "+err.Error())
-		return
-	}
-	httpReq.Header.Set("X-Admin-Key", req.AdminKey)
-
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(httpReq)
-	if err != nil {
-		writeError(c, http.StatusBadGateway, "连接远程实例失败: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		writeError(c, http.StatusBadGateway, fmt.Sprintf("远程实例返回错误 (%d): %s", resp.StatusCode, string(body)))
-		return
-	}
-
-	var remoteAccounts []cpaExportEntry
-	if err := json.NewDecoder(resp.Body).Decode(&remoteAccounts); err != nil {
-		writeError(c, http.StatusBadGateway, "解析远程数据失败: "+err.Error())
-		return
-	}
-
-	if len(remoteAccounts) == 0 {
-		c.JSON(http.StatusOK, gin.H{"message": "远程实例没有可迁移的健康账号", "total": 0, "imported": 0, "duplicate": 0, "failed": 0})
-		return
-	}
-
-	// 转换为 importToken 格式，复用 importAccountsCommon (原生支持 AT-only 混合导入)
-	var tokens []importToken
-	for _, entry := range remoteAccounts {
-		rt := strings.TrimSpace(entry.RefreshToken)
-		at := strings.TrimSpace(entry.AccessToken)
-		// 至少需要一种凭证;两者都为空表示账号根本没有可用凭证。
-		if rt == "" && at == "" {
-			continue
-		}
-		name := entry.Email
-		if name == "" {
-			name = "migrate"
-		}
-		tokens = append(tokens, importToken{
-			refreshToken:          rt,
-			accessToken:           at,
-			name:                  name,
-			email:                 strings.TrimSpace(entry.Email),
-			idToken:               strings.TrimSpace(entry.IDToken),
-			accountID:             strings.TrimSpace(entry.AccountID),
-			planType:              strings.TrimSpace(entry.PlanType),
-			expiresAt:             strings.TrimSpace(entry.Expired),
-			codex7DUsedPercent:    strings.TrimSpace(entry.Codex7DUsedPercent),
-			codex7DResetAt:        strings.TrimSpace(entry.Codex7DResetAt),
-			codex5HUsedPercent:    strings.TrimSpace(entry.Codex5HUsedPercent),
-			codex5HResetAt:        strings.TrimSpace(entry.Codex5HResetAt),
-			codex5HUsageUpdatedAt: strings.TrimSpace(entry.Codex5HUsageUpdatedAt),
-			codexUsageUpdatedAt:   strings.TrimSpace(entry.CodexUsageUpdatedAt),
-		})
-	}
-
-	log.Printf("远程迁移: 从 %s 拉取到 %d 个账号，开始导入", remoteURL, len(tokens))
-	h.importAccountsCommon(c, tokens, importSettings{})
-}
+// 至少需要一种凭证;两者都为空表示账号根本没有可用凭证。
 
 // ==================== Models ====================
 
@@ -12799,6 +11404,10 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 func (h *Handler) ListModels(c *gin.Context) {
 	catalog, _ := proxy.ListModelCatalog(c.Request.Context(), h.db)
 	h.addDaybreakCatalogModels(&catalog)
+	if h.store != nil && h.store.CodexOnly() {
+		c.JSON(http.StatusOK, catalog)
+		return
+	}
 	catalog.GrokModels = h.grokChannelModels()
 	catalog.AntigravityModels = h.antigravityChannelModels()
 	// The request-facing catalog must not advertise models contributed only by
@@ -13030,33 +11639,14 @@ func (h *Handler) CleanError(c *gin.Context) {
 }
 
 // CleanGrokBanned 清理封禁（unauthorized）的 Grok 账号
-func (h *Handler) CleanGrokBanned(c *gin.Context) {
-	h.cleanGrokByStatus(c, "unauthorized")
-}
 
 // CleanGrokError 清理错误（error）的 Grok 账号
-func (h *Handler) CleanGrokError(c *gin.Context) {
-	h.cleanGrokByStatus(c, "error")
-}
 
 // cleanGrokByStatus 按运行时状态清理 Grok 账号，不影响其它平台
-func (h *Handler) cleanGrokByStatus(c *gin.Context, targetStatus string) {
-	h.cleanAccountTargets(c, h.store.CollectCleanTargets(targetStatus, (*auth.Account).IsGrokAPI), "auto_clean")
-}
 
 // CleanAntigravityBanned 清理封禁的 Antigravity 账号。
-func (h *Handler) CleanAntigravityBanned(c *gin.Context) {
-	h.cleanAntigravityByStatus(c, "unauthorized")
-}
 
 // CleanAntigravityError 清理错误状态的 Antigravity 账号。
-func (h *Handler) CleanAntigravityError(c *gin.Context) {
-	h.cleanAntigravityByStatus(c, "error")
-}
-
-func (h *Handler) cleanAntigravityByStatus(c *gin.Context, targetStatus string) {
-	h.cleanAccountTargets(c, h.store.CollectCleanTargets(targetStatus, (*auth.Account).IsAntigravityAPI), "auto_clean")
-}
 
 // cleanByStatus 按运行时状态清理账号
 func (h *Handler) cleanByStatus(c *gin.Context, targetStatus string) {

@@ -107,9 +107,6 @@ func applyInternalResponseAttribution(c *gin.Context, req *http.Request, attribu
 // account pool. It is intended for bounded administrative jobs such as prompt
 // intelligence analysis and bypasses only the inbound prompt filter to avoid
 // the defensive analysis prompt blocking itself.
-func (h *Handler) ExecuteInternalResponse(ctx context.Context, body []byte) (int, []byte) {
-	return h.executeInternalResponseWithAttribution(ctx, body, nil)
-}
 
 // executeInternalResponseWithAttribution performs an internal Responses call
 // while preserving billing/routing identity from a parent request. The child

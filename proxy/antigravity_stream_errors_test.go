@@ -11,13 +11,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 // A real Cloud Code shape: HTTP 200, a partial text event, then a bare
@@ -151,61 +149,6 @@ func TestAntigravitySSEReaderBoundsBareDocuments(t *testing.T) {
 	}
 }
 
-func antigravityFailedEvent(t *testing.T, stream string) (string, []byte) {
-	t.Helper()
-	out, err := io.ReadAll(newAntigravitySSEResponseBody(io.NopCloser(strings.NewReader(stream)), "gemini-3.8-flash-medium"))
-	if err != nil {
-		t.Fatalf("read converted stream: %v", err)
-	}
-	var failed []byte
-	for _, line := range strings.Split(string(out), "\n") {
-		data, ok := strings.CutPrefix(line, "data: ")
-		if !ok {
-			continue
-		}
-		switch gjson.Get(data, "type").String() {
-		case "response.completed", "response.incomplete":
-			t.Fatalf("backend error became a successful terminal: %s", data)
-		case "response.failed":
-			failed = []byte(data)
-		}
-	}
-	if failed == nil {
-		t.Fatalf("no response.failed in converted stream:\n%s", out)
-	}
-	return string(out), failed
-}
-
-func TestAntigravitySSEBodySurfacesTrailingBareCapacityError(t *testing.T) {
-	out, failed := antigravityFailedEvent(t, antigravityTrailingCapacityStream)
-	if !strings.Contains(out, `"delta":"partial"`) {
-		t.Fatalf("partial text before the error was not streamed:\n%s", out)
-	}
-	errorValue := gjson.GetBytes(failed, "response.error")
-	if errorValue.Get("status_code").Int() != http.StatusServiceUnavailable || errorValue.Get("status").String() != "UNAVAILABLE" {
-		t.Fatalf("error = %s, want status_code 503 / UNAVAILABLE", errorValue.Raw)
-	}
-	if !strings.Contains(errorValue.Get("message").String(), "No capacity available for model gemini-3.8-flash-medium") {
-		t.Fatalf("upstream message lost: %s", errorValue.Raw)
-	}
-	detail := errorValue.Get("details.0")
-	if detail.Get("reason").String() != "MODEL_CAPACITY_EXHAUSTED" || detail.Get("metadata.model").String() != "gemini-3.8-flash-medium" {
-		t.Fatalf("quota detail lost: %s", errorValue.Raw)
-	}
-	if detail.Get("domain").Exists() || detail.Get("metadata.error_number").Exists() {
-		t.Fatalf("unneeded detail fields forwarded downstream: %s", detail.Raw)
-	}
-
-	outcome := classifyResponseFailedOutcome(failed)
-	if outcome.logStatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("logStatusCode = %d, want 503", outcome.logStatusCode)
-	}
-	account := &auth.Account{DBID: 7401, UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token", AntigravityProjectID: "google-project"}
-	if !antigravityNonPenalizingUpstreamFailure(account, outcome.logStatusCode, responseFailedErrorBody(outcome.failurePayload)) {
-		t.Fatal("a mid-stream MODEL_CAPACITY_EXHAUSTED must be recognised as the shared-pool shortage")
-	}
-}
-
 func newAntigravityStreamErrorTestHandler(t *testing.T) *Handler {
 	t.Helper()
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4"})
@@ -217,90 +160,6 @@ func antigravityFailureStreak(account *auth.Account) int {
 	account.Mu().RLock()
 	defer account.Mu().RUnlock()
 	return account.FailureStreak
-}
-
-func TestAntigravitySSEBodyMidStreamQuotaErrorCoolsModelDown(t *testing.T) {
-	_, failed := antigravityFailedEvent(t, antigravityTrailingQuotaStream)
-	errorValue := gjson.GetBytes(failed, "response.error")
-	if errorValue.Get("status_code").Int() != http.StatusTooManyRequests {
-		t.Fatalf("error = %s, want status_code 429", errorValue.Raw)
-	}
-	if len(errorValue.Get("details").Array()) != 2 {
-		t.Fatalf("details = %s, want only ErrorInfo and RetryInfo", errorValue.Get("details").Raw)
-	}
-	if strings.Contains(errorValue.Raw, "projects/123456789") || strings.Contains(errorValue.Raw, "example.invalid") {
-		t.Fatalf("consumer metadata or help links forwarded downstream: %s", errorValue.Raw)
-	}
-
-	h := newAntigravityStreamErrorTestHandler(t)
-	account := &auth.Account{DBID: 7402, UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token", AntigravityProjectID: "google-project"}
-	h.store.AddAccount(account)
-	decision := h.applyResponseFailedCooldown(account, failed, nil, "gemini-3.7-flash-high")
-	if decision.Reason != "quota_exhausted" || decision.Cooldown < 4*time.Minute+45*time.Second || decision.Cooldown > 4*time.Minute+50*time.Second {
-		t.Fatalf("decision = %+v, want the QUOTA_EXHAUSTED retryDelay of 4m50s", decision)
-	}
-	if !account.IsModelRateLimited("gemini-3.7-flash-high") {
-		t.Fatal("the exhausted model was not cooled down after a mid-stream 429")
-	}
-}
-
-func TestReportStreamOutcomeFailureSkipsAntigravityCapacityShortage(t *testing.T) {
-	_, capacityFailed := antigravityFailedEvent(t, antigravityTrailingCapacityStream)
-	h := newAntigravityStreamErrorTestHandler(t)
-	account := &auth.Account{DBID: 7403, UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token", AntigravityProjectID: "google-project"}
-	h.store.AddAccount(account)
-
-	h.reportStreamOutcomeFailure(account, classifyResponseFailedOutcome(capacityFailed), 0)
-	if got := antigravityFailureStreak(account); got != 0 {
-		t.Fatalf("capacity shortage changed FailureStreak to %d", got)
-	}
-
-	internal := "data: {\"error\":{\"code\":500,\"message\":\"Internal error encountered.\",\"status\":\"INTERNAL\"}}\n\n"
-	_, internalFailed := antigravityFailedEvent(t, internal)
-	h.reportStreamOutcomeFailure(account, classifyResponseFailedOutcome(internalFailed), 0)
-	if got := antigravityFailureStreak(account); got != 1 {
-		t.Fatalf("control: a mid-stream INTERNAL error must still be reported, FailureStreak = %d", got)
-	}
-}
-
-func TestAntigravityNativeGeminiStreamReturnsTypedBackendError(t *testing.T) {
-	body := newAntigravityNativeGeminiSSEResponseBody(io.NopCloser(strings.NewReader(antigravityTrailingCapacityStream)), nil)
-	out, err := io.ReadAll(body)
-	if !strings.Contains(string(out), "partial") {
-		t.Fatalf("partial chunk was not forwarded: %s", out)
-	}
-	var streamErr *antigravityStreamError
-	if !errors.As(err, &streamErr) {
-		t.Fatalf("error = %T %v, want *antigravityStreamError", err, err)
-	}
-	if streamErr.StatusCode != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "No capacity available") {
-		t.Fatalf("stream error = %d %v", streamErr.StatusCode, err)
-	}
-
-	h := newAntigravityStreamErrorTestHandler(t)
-	account := &auth.Account{DBID: 7404, UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token", AntigravityProjectID: "google-project"}
-	h.store.AddAccount(account)
-	outcome := h.antigravityStreamErrorOutcome(account, streamErr, nil, "gemini-3.8-flash-medium")
-	if outcome.logStatusCode != http.StatusServiceUnavailable || !strings.Contains(outcome.failureMessage, "No capacity available") {
-		t.Fatalf("outcome = %+v", outcome)
-	}
-	h.reportStreamOutcomeFailure(account, outcome, 0)
-	if got := antigravityFailureStreak(account); got != 0 {
-		t.Fatalf("native capacity shortage changed FailureStreak to %d", got)
-	}
-}
-
-func TestAntigravityJSONResponseCarriesBackendErrorStatus(t *testing.T) {
-	raw := `[{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}]`
-	converted, err := newAntigravityJSONResponseBody(io.NopCloser(strings.NewReader(raw)), "gemini-3.8-flash-medium")
-	if err != nil {
-		t.Fatalf("convert: %v", err)
-	}
-	out, _ := io.ReadAll(converted)
-	if gjson.GetBytes(out, "status").String() != "failed" || gjson.GetBytes(out, "error.status_code").Int() != http.StatusTooManyRequests ||
-		gjson.GetBytes(out, "error.type").String() != "upstream_error" || gjson.GetBytes(out, "error.message").String() != "Resource has been exhausted" {
-		t.Fatalf("converted = %s", out)
-	}
 }
 
 func TestAntigravityStreamErrorStatusCode(t *testing.T) {

@@ -569,19 +569,8 @@ func (s *scopeSkipStats) reset(apiKeyID int64) {
 
 // APIKeyScopeSkipSnapshot 返回某 API Key 各条 scope 预算的命中统计(键为 "type:id")。
 // 供管理端展示"这条预算已生效、影响了多少请求"。
-func APIKeyScopeSkipSnapshot(apiKeyID int64) map[string]APIKeyScopeSkipStat {
-	if apiKeyID <= 0 {
-		return map[string]APIKeyScopeSkipStat{}
-	}
-	return apiKeyScopeSkipStats.snapshot(apiKeyID)
-}
 
 // ResetAPIKeyScopeSkipStats 清掉某 API Key 的命中统计(配置改动后重新观察时用)。
-func ResetAPIKeyScopeSkipStats(apiKeyID int64) {
-	if apiKeyID > 0 {
-		apiKeyScopeSkipStats.reset(apiKeyID)
-	}
-}
 
 // ==================== 请求级闸门 ====================
 

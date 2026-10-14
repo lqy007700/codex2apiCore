@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"log"
 	"net/http"
 	"time"
@@ -40,12 +39,6 @@ func claudeNativeFirstTokenOutcome(guard *firstTokenTimeoutGuard, firstTokenMs i
 // 注释（间隔沿用 continuousRetryKeepaliveInterval）。原生透传会把 message_start 等
 // 首字前帧扣住等待静默重试窗口，下游在长推理期间收不到任何字节，网关/客户端会误判
 // 连接已死而超时重试，放大并发占用；保活让"上游在思考"与"连接已死"可区分。
-func activateClaudeStreamKeepalive(ctx context.Context, store *auth.Store, account *auth.Account, isStream bool) {
-	if !isStream || store == nil || !account.IsClaudeOAuth() || !store.ClaudeStreamKeepaliveEnabled() {
-		return
-	}
-	activateContinuousRetryKeepalive(ctx)
-}
 
 // claudeFirstTokenSlow 报告已记录的首字耗时是否超过缓慢阈值；0 表示未记录到首字。
 func claudeFirstTokenSlow(firstTokenMs int) bool {

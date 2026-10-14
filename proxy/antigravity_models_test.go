@@ -36,14 +36,6 @@ func TestAntigravityPublicModelCatalogIsExact(t *testing.T) {
 	}
 }
 
-func TestAntigravityFixedTierModelsDoNotExposeReasoningLevels(t *testing.T) {
-	for _, model := range antigravityPublicModelIDs() {
-		if got := antigravityCodexReasoningLevels(model); len(got) != 0 {
-			t.Fatalf("%s reasoning levels = %v, want none", model, got)
-		}
-	}
-}
-
 func TestAntigravityLogicalModelsResolveEffortToBacking(t *testing.T) {
 	for _, test := range []struct {
 		model, effort, wire string

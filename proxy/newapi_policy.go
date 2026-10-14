@@ -221,11 +221,6 @@ func (h *Handler) newAPIIdentitySecrets(c *gin.Context, now time.Time) (apiKeyID
 	return apiKeyID, normalizedNewAPIPlatform(""), false, nil
 }
 
-func (h *Handler) verifyNewAPIIdentity(c *gin.Context, cfg promptfilter.NewAPIConfig, body []byte) (newAPIIdentity, bool) {
-	verified, ok := h.verifyNewAPIIdentityContext(c, cfg, body)
-	return verified.Identity, ok
-}
-
 func (h *Handler) verifyNewAPIIdentityContext(c *gin.Context, cfg promptfilter.NewAPIConfig, body []byte) (verifiedNewAPIIdentityContext, bool) {
 	if c == nil || !cfg.Enabled {
 		return verifiedNewAPIIdentityContext{}, false
@@ -610,29 +605,6 @@ func requestUsesAnthropicErrorEnvelope(c *gin.Context) bool {
 
 // VerifyNewAPIPolicyHandshake validates the exact signed identity headers used
 // by NewAPI without invoking an upstream model or recording an offense.
-func (h *Handler) VerifyNewAPIPolicyHandshake(c *gin.Context) {
-	cfg := h.promptFilterConfigForRequest(c)
-	if _, identityVerified := h.verifyNewAPIIdentityContext(c, cfg.Advanced.NewAPI, nil); !identityVerified {
-		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "NewAPI 审计签名校验失败"})
-		return
-	}
-	policyContext, ok := h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, nil)
-	if !ok {
-		metaProvided := strings.TrimSpace(c.GetHeader("X-NewAPI-Policy-Meta")) != "" || strings.TrimSpace(c.GetHeader("X-NewAPI-Policy-Meta-Signature")) != ""
-		if metaProvided {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{"success": false, "message": "NewAPI 审核档案元数据签名或格式无效", "code": "policy_meta_invalid", "identity_verified": true})
-			return
-		}
-		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "NewAPI 审计签名校验失败"})
-		return
-	}
-	metaProvided := strings.TrimSpace(c.GetHeader("X-NewAPI-Policy-Meta")) != "" || strings.TrimSpace(c.GetHeader("X-NewAPI-Policy-Meta-Signature")) != ""
-	if metaProvided && !policyContext.MetaVerified {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"success": false, "message": "NewAPI 审核档案元数据签名或格式无效", "code": "policy_meta_invalid", "identity_verified": true})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "NewAPI 审计签名校验成功", "user_id": policyContext.Identity.UserID, "client_ip": policyContext.Identity.ClientIP, "request_id": policyContext.Identity.RequestID, "timestamp": c.GetHeader("X-NewAPI-Timestamp"), "platform": policyContext.Platform, "policy_meta_verified": policyContext.MetaVerified, "policy_meta": policyContext.Meta})
-}
 
 // sendNewAPIPolicyDecision returns a structured policy event to NewAPI. NewAPI
 // is the single authority for strikes and account/IP restrictions; Codex2API

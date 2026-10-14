@@ -88,17 +88,6 @@ type codexTestCapture struct {
 	truncated bool
 }
 
-func (b *codexTestCapture) Write(p []byte) (int, error) {
-	n := len(p)
-	remaining := max(0, b.limit-b.Len())
-	if len(p) > remaining {
-		b.truncated = true
-		p = p[:remaining]
-	}
-	_, _ = b.Buffer.Write(p)
-	return n, nil
-}
-
 var codexTestProxyCredentials = regexp.MustCompile(`(?i)((?:https?|socks5h?)://)[^\s/]+@`)
 
 // codexTestSecrets 收集本次探针可能出现在响应正文/头里的账号凭据,用于脱敏。

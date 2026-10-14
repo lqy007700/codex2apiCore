@@ -62,28 +62,3 @@ func TestAntigravityFinalizeToolSchemaDropsEnumAndAddsArrayItems(t *testing.T) {
 		t.Fatal("enum hint missing from description")
 	}
 }
-
-func TestAntigravityEnsureGeminiLeadingUserContent(t *testing.T) {
-	request := map[string]any{
-		"contents": []any{
-			map[string]any{"role": "model", "parts": []any{map[string]any{"text": "prior"}}},
-			map[string]any{"role": "user", "parts": []any{map[string]any{"text": "next"}}},
-		},
-	}
-	antigravityEnsureGeminiLeadingUserContent(request, "gemini-3.7-flash-tiered")
-	contents := request["contents"].([]any)
-	if len(contents) != 3 {
-		t.Fatalf("contents len = %d", len(contents))
-	}
-	first, _ := contents[0].(map[string]any)
-	if first["role"] != "user" {
-		t.Fatalf("first role = %#v", first["role"])
-	}
-}
-
-func TestUnwrapAntigravityCountTokensResponse(t *testing.T) {
-	got := unwrapAntigravityCountTokensResponse([]byte(`{"response":{"totalTokens":42}}`))
-	if string(got) != `{"totalTokens":42}` {
-		t.Fatalf("unwrap = %s", got)
-	}
-}

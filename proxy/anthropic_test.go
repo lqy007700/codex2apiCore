@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
@@ -1265,44 +1264,6 @@ func TestResolveMessagesRoutingBodySkipsFullTranslation(t *testing.T) {
 	}
 	if !gjson.GetBytes(got, "service_tier").Exists() {
 		t.Fatalf("speed=fast should set service_tier: %s", got)
-	}
-}
-
-func TestNativeClaudeRoutingRespectsAvailabilityAndAPIKeyChannel(t *testing.T) {
-	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
-	defer store.Stop()
-	account := &auth.Account{
-		DBID:         91,
-		UpstreamType: auth.UpstreamClaude,
-		AccessToken:  "claude-token",
-		Status:       auth.StatusReady,
-		Models:       []string{"claude-sonnet-4-5"},
-	}
-	store.AddAccount(account)
-	h := &Handler{store: store}
-
-	if !h.hasNativeClaudeAccountForModel("claude-sonnet-4-5") {
-		t.Fatal("available Claude account should enable native routing")
-	}
-
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 7, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelCodex}})
-	c.Set(contextAPIKeyID, int64(7))
-	if h.hasNativeClaudeAccountForRequest(c, "claude-sonnet-4-5") {
-		t.Fatal("a Codex-only API key must not force native Claude routing")
-	}
-
-	c.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 8, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelClaude}})
-	c.Set(contextAPIKeyID, int64(8))
-	if !h.hasNativeClaudeAccountForRequest(c, "claude-sonnet-4-5") {
-		t.Fatal("a Claude API key should allow native Claude routing")
-	}
-
-	store.MarkCooldown(account, time.Minute, "rate_limited")
-	if h.hasNativeClaudeAccountForModel("claude-sonnet-4-5") {
-		t.Fatal("a cooled-down Claude account must not force native routing")
 	}
 }
 

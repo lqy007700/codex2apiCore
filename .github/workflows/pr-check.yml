@@ -49,13 +49,13 @@ jobs:
         working-directory: frontend
         run: npm run typecheck
 
-      - name: Install Chromium for SVG export regression tests
+      - name: Install Chrome for account service browser tests
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chrome
 
-      - name: Test SVG export in the browser
+      - name: Test account service in the browser
         working-directory: frontend
-        run: npm run test:svg
+        run: npm run test:browser
 
       - name: Build frontend
         working-directory: frontend

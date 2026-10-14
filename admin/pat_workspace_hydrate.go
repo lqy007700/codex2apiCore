@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
-	"sync"
+
 	"time"
 
 	"github.com/codex2api/auth"
@@ -80,36 +80,3 @@ func (h *Handler) hydratePATWorkspace(ctx context.Context, account *auth.Account
 
 // hydratePATWorkspaces 在每轮小时探针前批量补全缺工作区的 PAT，补上的账号本轮即可
 // 进入官方用量候选。并发与探针一致，避免号池大时一口气打爆 whoami。
-func (h *Handler) hydratePATWorkspaces(ctx context.Context) {
-	if h == nil || h.store == nil {
-		return
-	}
-	var pending []*auth.Account
-	for _, account := range h.store.Accounts() {
-		if needsPATWorkspaceHydration(account) {
-			pending = append(pending, account)
-		}
-	}
-	if len(pending) == 0 {
-		return
-	}
-	sem := make(chan struct{}, whamDailyUsageProbeConcurrency)
-	var wg sync.WaitGroup
-	for _, account := range pending {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		go func(acc *auth.Account) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
-			h.hydratePATWorkspace(ctx, acc, false)
-		}(account)
-	}
-	wg.Wait()
-}

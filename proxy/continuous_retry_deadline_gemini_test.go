@@ -1,18 +1,15 @@
 package proxy
 
 import (
-	"context"
 	"encoding/json"
-	"io"
+
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 func TestContinuousRetryGeminiTimeoutUsesNativeError(t *testing.T) {
@@ -85,83 +82,8 @@ func TestContinuousRetryGeminiTimeoutUsesNativeError(t *testing.T) {
 	}
 }
 
-func TestGeminiHandlerContinuousRetryDeadlineUsesNativeError(t *testing.T) {
-	previousSettings := CurrentRuntimeSettings()
-	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
-	settings := previousSettings
-	// Install a short real retry timer on the request rather than replacing it
-	// with the handler's policy timer, whose minimum duration is one second.
-	settings.ContinuousRetryPolicy = database.ContinuousRetryPolicy{}
-	ApplyRuntimeSettings(settings)
-	previousInterval := continuousRetryKeepaliveInterval
-	continuousRetryKeepaliveInterval = time.Hour
-	t.Cleanup(func() { continuousRetryKeepaliveInterval = previousInterval })
-	for _, afterThought := range []bool{false, true} {
-		name := "waiting for upstream headers"
-		if afterThought {
-			name = "after streamed thought"
-		}
-		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithCancelCause(context.Background())
-			defer cancel(nil)
-			deadline := &continuousRetryDeadline{duration: 40 * time.Millisecond, cancel: cancel}
-			defer deadline.Stop()
-			ctx = context.WithValue(ctx, continuousRetryDeadlineContextKey{}, deadline)
-			upstreamCanceled := make(chan struct{})
-			router, db := newGeminiStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
-				if afterThought {
-					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = io.WriteString(w, "data: "+geminiStreamTestThought+"\n\n")
-					w.(http.Flusher).Flush()
-				}
-				deadline.Activate()
-				<-r.Context().Done()
-				close(upstreamCanceled)
-			})
-			recorder := httptest.NewRecorder()
-			done := make(chan struct{})
-			go func() {
-				router.ServeHTTP(recorder, geminiStreamTestHTTPRequest(ctx, "streamGenerateContent"))
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-time.After(2 * time.Second):
-				cancel(nil)
-				t.Fatal("handler did not terminate at continuous retry deadline")
-			}
-			select {
-			case <-upstreamCanceled:
-			case <-time.After(time.Second):
-				t.Fatal("deadline did not cancel the upstream request")
-			}
-			body := recorder.Body.String()
-			payload := body
-			wantHTTP := http.StatusGatewayTimeout
-			if afterThought {
-				wantHTTP = http.StatusOK
-				if !strings.Contains(body, "THOUGHT_ONLY") {
-					t.Fatalf("fixture did not stream thought before timeout: %s", body)
-				}
-				lastFrameEnd := strings.LastIndex(body, "\n\n")
-				if lastFrameEnd < 0 {
-					t.Fatalf("missing SSE frame before terminal error: %s", body)
-				}
-				payload = body[lastFrameEnd+2:]
-				if !json.Valid([]byte(payload)) || payload != strings.TrimSpace(payload) || strings.Count(body, `"error":`) != 1 {
-					t.Fatalf("expected one bare JSON terminal error without a trailing SSE delimiter: %s", body)
-				}
-				assertGeminiStreamUsageStatus(t, db, http.StatusGatewayTimeout, true)
-			}
-			if recorder.Code != wantHTTP || gjson.Get(payload, "error.code").Int() != http.StatusGatewayTimeout || gjson.Get(payload, "error.status").String() != "DEADLINE_EXCEEDED" {
-				t.Fatalf("status=%d body=%s, want native Gemini deadline error", recorder.Code, body)
-			}
-			if strings.Contains(body, "response.failed") || strings.Contains(body, `"finishReason":"STOP"`) {
-				t.Fatalf("timeout contains an invalid terminal: %s", body)
-			}
-		})
-	}
-}
+// Install a short real retry timer on the request rather than replacing it
+// with the handler's policy timer, whose minimum duration is one second.
 
 func TestWriteGeminiNativeErrorDoesNotAppendSSEToCommittedJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)

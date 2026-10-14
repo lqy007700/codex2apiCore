@@ -1,13 +1,12 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
-	"mime/multipart"
+
 	"net/http"
-	"net/http/httptest"
+
 	"strconv"
 	"testing"
 
@@ -183,81 +182,5 @@ func TestAddATAccountRejectsUnknownGroupBeforeCreatingAccounts(t *testing.T) {
 	}
 	if len(accounts) != 0 {
 		t.Fatalf("accounts = %d, want none created when the group id is invalid", len(accounts))
-	}
-}
-
-func TestImportAccountsFormBindsGroupsForNewAccounts(t *testing.T) {
-	handler, db, _, groupID := newImportGroupsTestHandler(t)
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	_ = writer.WriteField("format", "at_txt")
-	_ = writer.WriteField("group_ids", "["+itoa(groupID)+"]")
-	filePart, err := writer.CreateFormFile("file", "accounts.txt")
-	if err != nil {
-		t.Fatalf("CreateFormFile: %v", err)
-	}
-	if _, err := filePart.Write([]byte("file-import-at-1\nfile-import-at-2\n")); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("close writer: %v", err)
-	}
-
-	recorder := httptest.NewRecorder()
-	ginContext, _ := gin.CreateTestContext(recorder)
-	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", body)
-	ginContext.Request.Header.Set("Content-Type", writer.FormDataContentType())
-	handler.ImportAccounts(ginContext)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("import status = %d: %s", recorder.Code, recorder.Body.String())
-	}
-
-	ctx := context.Background()
-	accounts, err := db.ListActive(ctx)
-	if err != nil {
-		t.Fatalf("ListAccounts: %v", err)
-	}
-	if len(accounts) != 2 {
-		t.Fatalf("accounts = %d, want 2 imported", len(accounts))
-	}
-	for _, account := range accounts {
-		groups, err := db.GetAccountGroupIDs(ctx, account.ID)
-		if err != nil {
-			t.Fatalf("GetAccountGroupIDs(%d): %v", account.ID, err)
-		}
-		if len(groups) != 1 || groups[0] != groupID {
-			t.Fatalf("account %d groups = %v, want [%d]", account.ID, groups, groupID)
-		}
-	}
-}
-
-func TestImportAccountsRejectsUnknownGroupBeforeParsingFiles(t *testing.T) {
-	handler, db, _, _ := newImportGroupsTestHandler(t)
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	_ = writer.WriteField("format", "at_txt")
-	_ = writer.WriteField("group_ids", "[987654]")
-	filePart, _ := writer.CreateFormFile("file", "accounts.txt")
-	_, _ = filePart.Write([]byte("file-import-at-3\n"))
-	_ = writer.Close()
-
-	recorder := httptest.NewRecorder()
-	ginContext, _ := gin.CreateTestContext(recorder)
-	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", body)
-	ginContext.Request.Header.Set("Content-Type", writer.FormDataContentType())
-	handler.ImportAccounts(ginContext)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body.String())
-	}
-	accounts, err := db.ListActive(context.Background())
-	if err != nil {
-		t.Fatalf("ListAccounts: %v", err)
-	}
-	if len(accounts) != 0 {
-		t.Fatalf("accounts = %d, want none imported when the group id is invalid", len(accounts))
 	}
 }

@@ -1,3 +1,5 @@
+> This fork is a Codex account-pool backend for New API. See [the fork guide](docs/CORE_ACCOUNT_SERVICE.md) for its scope, integration and validation. The upstream documentation below includes retired features; use the fork guide and registered routes as the source of truth.
+
 <p align="center">
   <img src="assets/banner.svg" alt="Codex2API" width="100%">
 </p>

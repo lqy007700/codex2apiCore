@@ -1,21 +1,14 @@
 package admin
 
 import (
-	"archive/zip"
-	"bytes"
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"net/http"
-	"path"
+
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
-	"github.com/gin-gonic/gin"
 )
 
 // grokExportEntry 是单个 Grok 账号的导出形态：Grok CLI auth.json 的超集。
@@ -61,17 +54,6 @@ type grokExportEntry struct {
 // marshalGrokExportEntry 按参考文件的排版输出：2 空格缩进、键按字母序。
 // encoding/json 对结构体按字段声明顺序输出，这里先转成 map 再编码以拿到字母序
 // （Go 对 map 键排序），与 Grok CLI 写出的文件保持同形。
-func marshalGrokExportEntry(entry grokExportEntry) ([]byte, error) {
-	raw, err := json.Marshal(entry)
-	if err != nil {
-		return nil, err
-	}
-	var ordered map[string]any
-	if err := json.Unmarshal(raw, &ordered); err != nil {
-		return nil, err
-	}
-	return json.MarshalIndent(ordered, "", "  ")
-}
 
 // grokAccountRowToExportEntry 把账号行转成导出条目。凭据两者皆空时返回 ok=false
 // （没有可迁移的东西）。proxies 决定是否连同账号绑定的代理一起导出。
@@ -187,94 +169,15 @@ func grokExportFileName(email, sub string, id int64) string {
 // ExportGrokAccounts 导出 Grok 账号凭据（GET /api/admin/accounts/grok/export）。
 // 单个账号直接返回裸 JSON；多个账号打包成 ZIP，内部每账号一个 <邮箱>.json，
 // 解开即可逐个导入。
-func (h *Handler) ExportGrokAccounts(c *gin.Context) {
-	filter := c.DefaultQuery("filter", "all")
-	idsParam := c.Query("ids")
 
-	// 与 /accounts/export 同一道门禁：导出文件含明文 refresh_token。
-	if c.Query("remote") == "true" {
-		if !h.hasConfiguredAdminSecret(c.Request.Context()) {
-			writeError(c, http.StatusForbidden, "请先设置管理密钥，再启用远程迁移")
-			return
-		}
-		if !h.store.GetAllowRemoteMigration() {
-			writeError(c, http.StatusForbidden, "远程迁移未启用，请在系统设置中开启")
-			return
-		}
-	}
+// 与 /accounts/export 同一道门禁：导出文件含明文 refresh_token。
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
-	defer cancel()
-
-	rows, err := h.db.ListActive(ctx)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
-		return
-	}
-
-	proxies := h.newExportProxyResolver(ctx, exportIncludeProxy(c, false))
-	idSet := parseExportIDSet(idsParam)
-	runtimeMap := make(map[int64]*auth.Account)
-	if filter == "healthy" && h.store != nil {
-		for _, account := range h.store.Accounts() {
-			runtimeMap[account.DBID] = account
-		}
-	}
-
-	entries := make([]grokExportEntry, 0, len(rows))
-	for _, row := range rows {
-		if !isGrokAccountRow(row) {
-			continue
-		}
-		if idSet != nil && !idSet[row.ID] {
-			continue
-		}
-		if filter == "healthy" {
-			account, ok := runtimeMap[row.ID]
-			if !ok || account.RuntimeStatus() != "active" {
-				continue
-			}
-		}
-		entry, ok := grokAccountRowToExportEntry(row, proxies)
-		if !ok {
-			continue
-		}
-		entries = append(entries, entry)
-	}
-
-	if len(entries) == 0 {
-		writeError(c, http.StatusNotFound, "没有可导出的 Grok 账号")
-		return
-	}
-
-	// 单账号：直接给裸 JSON，内容形态与 Grok CLI 的单凭据文件一致。
-	if len(entries) == 1 {
-		encoded, err := marshalGrokExportEntry(entries[0])
-		if err != nil {
-			writeError(c, http.StatusInternalServerError, "序列化导出文件失败: "+err.Error())
-			return
-		}
-		writeSecretDownloadHeaders(c, grokExportDownloadName(1, "json"))
-		c.Data(http.StatusOK, "application/json; charset=utf-8", encoded)
-		return
-	}
-
-	archive, err := buildGrokExportZIP(entries)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "打包导出文件失败: "+err.Error())
-		return
-	}
-	writeSecretDownloadHeaders(c, grokExportDownloadName(len(entries), "zip"))
-	c.Data(http.StatusOK, "application/zip", archive)
-}
+// 单账号：直接给裸 JSON，内容形态与 Grok CLI 的单凭据文件一致。
 
 // grokExportDownloadName 生成下载文件名，沿用仓库既有的导出命名约定
 // codex2api-<平台>-<时间戳>-<数量>.<ext>（对齐 codex2api-recycle-… 等）。
 // 注意这只是下载物的名字：ZIP 内部成员按 <邮箱>.json 命名，
 // 保留每个账号的身份、也让解开后能逐个导入。
-func grokExportDownloadName(count int, ext string) string {
-	return fmt.Sprintf("codex2api-grok-%s-%d.%s", time.Now().UTC().Format("20060102-150405"), count, ext)
-}
 
 // accountRowToExportEntry 按平台分派导出形态：Grok/xAI 账号走 Grok CLI 超集形态，
 // 传统 Codex 账号走 CPA 形态。Claude OAuth 不进入这个通用导出端点：其 token
@@ -338,146 +241,9 @@ type grokCLIAuthEntry struct {
 // grokCLIAuthJSONFromRow 把 Grok OAuth 账号转成 CLI auth.json。includeRefreshToken=false
 // 时只交出 access token：xAI 的 RT 家族会轮换，网关与 CLI 共用同一 RT 时先刷新的一方
 // 会让另一方 invalid_grant。
-func grokCLIAuthJSONFromRow(row *database.AccountRow, includeRefreshToken bool) (map[string]grokCLIAuthEntry, error) {
-	if !isGrokAccountRow(row) {
-		return nil, errGrokAccountRequired
-	}
-	if row.GetCredential("api_key") != "" {
-		return nil, errors.New("API Key 账号不使用 OAuth 登录，无法生成 Grok CLI auth.json")
-	}
-	accessToken := row.GetCredential("access_token")
-	if accessToken == "" {
-		return nil, errors.New("账号缺少 access token，请先刷新账号后再生成 auth.json")
-	}
-	refreshToken := row.GetCredential("refresh_token")
-	if includeRefreshToken && refreshToken == "" {
-		return nil, errors.New("账号缺少 refresh token，只能生成仅含 access token 的 auth.json")
-	}
-
-	subject, issuedAt, tokenExpiresAt := auth.GrokAccessTokenHints(accessToken)
-	issuer := strings.TrimRight(row.GetCredential("grok_oidc_issuer"), "/")
-	if issuer == "" {
-		issuer = auth.GrokDefaultOIDCIssuer
-	}
-	clientID := row.GetCredential("grok_client_id")
-	if clientID == "" {
-		clientID = auth.GrokDefaultOAuthClientID
-	}
-	userID := row.GetCredential("account_id")
-	if userID == "" {
-		userID = subject
-	}
-	principalID := row.GetCredential("grok_principal_id")
-	if principalID == "" {
-		principalID = userID
-	}
-	principalType := row.GetCredential("grok_principal_type")
-	if principalType == "" && principalID != "" && principalID == userID {
-		principalType = "User"
-	}
-	expiresAt := grokParseExportTime(strings.TrimSpace(row.GetCredential("expires_at")))
-	if expiresAt.IsZero() {
-		expiresAt = tokenExpiresAt
-	}
-
-	entry := grokCLIAuthEntry{
-		Key:           accessToken,
-		AuthMode:      "oidc",
-		UserID:        userID,
-		Email:         row.GetCredential("email"),
-		PrincipalType: principalType,
-		PrincipalID:   principalID,
-		OIDCIssuer:    issuer,
-		OIDCClientID:  clientID,
-	}
-	if includeRefreshToken {
-		entry.RefreshToken = refreshToken
-	}
-	if !issuedAt.IsZero() {
-		entry.CreateTime = issuedAt.UTC().Format(time.RFC3339Nano)
-	}
-	if !expiresAt.IsZero() {
-		entry.ExpiresAt = expiresAt.UTC().Format(time.RFC3339Nano)
-	}
-	return map[string]grokCLIAuthEntry{issuer + "::" + clientID: entry}, nil
-}
 
 // GetGrokAccountAuthJSON 生成单个 Grok OAuth 账号可直接放进 ~/.grok/auth.json 的文件
 // （GET /api/admin/accounts/:id/grok/auth-json?include_refresh_token=true|false）。
-func (h *Handler) GetGrokAccountAuthJSON(c *gin.Context) {
-	id, ok := parseGrokAdminAccountID(c)
-	if !ok {
-		return
-	}
-	includeRefreshToken := strings.EqualFold(strings.TrimSpace(c.Query("include_refresh_token")), "true")
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-	defer cancel()
-
-	account, _, err := h.grokAdminAccount(ctx, id)
-	if err != nil {
-		writeGrokAdminError(c, err)
-		return
-	}
-	if account.GrokAuthKind() == auth.GrokAuthKindOAuth && grokAccessTokenExpiresWithin(account, grokCLIAuthMinRemaining) {
-		if refreshErr := h.store.RefreshGrokAccountByID(ctx, id); refreshErr != nil && grokAccessTokenStale(account) {
-			writeError(c, http.StatusConflict, "access token 已过期且刷新失败，请先刷新账号后再生成 auth.json")
-			return
-		}
-	}
-
-	row, err := h.db.GetAccountByID(ctx, id)
-	if err != nil {
-		writeGrokAdminError(c, err)
-		return
-	}
-	file, err := grokCLIAuthJSONFromRow(row, includeRefreshToken)
-	if err != nil {
-		if errors.Is(err, errGrokAccountRequired) {
-			writeGrokAdminError(c, err)
-			return
-		}
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	encoded, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "序列化 auth.json 失败: "+err.Error())
-		return
-	}
-	writeSecretDownloadHeaders(c, "auth.json")
-	c.Data(http.StatusOK, "application/json; charset=utf-8", encoded)
-}
 
 // buildGrokExportZIP 把多个条目打成 ZIP，每个条目一个 <sub>.json。
 // 同名（同一 sub 出现多次）时追加序号，避免条目互相覆盖。
-func buildGrokExportZIP(entries []grokExportEntry) ([]byte, error) {
-	var buf bytes.Buffer
-	writer := zip.NewWriter(&buf)
-	used := make(map[string]int, len(entries))
-
-	for _, entry := range entries {
-		name := entry.exportFileName
-		if seen := used[name]; seen > 0 {
-			ext := path.Ext(name)
-			name = fmt.Sprintf("%s-%d%s", strings.TrimSuffix(name, ext), seen+1, ext)
-		}
-		used[entry.exportFileName]++
-
-		file, err := writer.Create(name)
-		if err != nil {
-			return nil, err
-		}
-		encoded, err := marshalGrokExportEntry(entry)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := file.Write(encoded); err != nil {
-			return nil, err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}

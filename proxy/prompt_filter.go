@@ -41,22 +41,11 @@ func (h *Handler) inspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endp
 // synchronous proxy handlers to in-process V1 entry points such as async image
 // jobs. writeBlock may preserve an endpoint-specific error envelope; verified
 // NewAPI policy decisions still take precedence when they own the response.
-func (h *Handler) InspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endpoint string, model string, writeBlock func(*gin.Context)) bool {
-	var messageWriter func(*gin.Context, string)
-	if writeBlock != nil {
-		messageWriter = func(c *gin.Context, _ string) { writeBlock(c) }
-	}
-	return h.InspectPromptFilterOpenAIWithBlockMessage(c, rawBody, endpoint, model, messageWriter)
-}
 
 // InspectPromptFilterOpenAIWithBlockMessage is the message-aware variant for
 // endpoints that keep their own error envelope. The callback receives the
 // configured local block message, or an empty string when the endpoint should
 // retain its existing default.
-func (h *Handler) InspectPromptFilterOpenAIWithBlockMessage(c *gin.Context, rawBody []byte, endpoint string, model string, writeBlock func(*gin.Context, string)) bool {
-	h.capturePromptRequestIngress(c, rawBody)
-	return h.inspectPromptFilterOpenAIWithBlockWriter(c, rawBody, endpoint, model, writeBlock)
-}
 
 func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBody []byte, endpoint string, model string, writeBlock func(*gin.Context, string)) bool {
 	if c != nil && c.GetBool("prompt_intelligence_internal") {
@@ -95,41 +84,6 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	}
 	if writeBlock != nil {
 		writeBlock(c, strings.TrimSpace(cfg.Advanced.Enforcement.LocalBlockMessage))
-		return true
-	}
-	api.SendErrorWithStatus(c, api.NewAPIError(
-		api.ErrorCode("prompt_blocked"),
-		localPromptBlockMessage(cfg),
-		api.ErrorTypeInvalidRequest,
-	), http.StatusBadRequest)
-	return true
-}
-
-func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, endpoint string, model string) bool {
-	if h == nil || h.store == nil {
-		return false
-	}
-	cfg := h.promptFilterConfigForRequest(c)
-	if h.rejectRequiredNewAPIIdentity(c, cfg.Advanced.NewAPI, ingressRequestBody(c, nil)) {
-		return true
-	}
-	if h.rejectLockedPromptConversation(c, cfg, ingressRequestBody(c, nil), []byte(text), endpoint, model) {
-		return true
-	}
-	if !promptfilter.RequiresRequestText(cfg) {
-		return false
-	}
-	evaluation := h.evaluatePromptGuardTextWithConfig(c, cfg, text, endpoint, model)
-	verdict := evaluation.Verdict
-	h.logPromptGuardEvaluation(c, endpoint, model, "local_filter", "", evaluation)
-	if verdict.Action == promptfilter.ActionWarn {
-		c.Header("X-Prompt-Filter-Warning", promptFilterWarningMessage(evaluation))
-	}
-	if verdict.Action != promptfilter.ActionBlock {
-		return false
-	}
-	h.lockPromptConversationOnLocalBlock(c, cfg, ingressRequestBody(c, nil), endpoint, model, evaluation.Decision, verdict)
-	if h.sendNewAPIPolicyDecision(c, cfg, evaluation.Decision, verdict, []byte(text), endpoint, model, ingressRequestBody(c, nil)) {
 		return true
 	}
 	api.SendErrorWithStatus(c, api.NewAPIError(
@@ -181,10 +135,6 @@ func promptFilterWarningMessage(evaluation promptGuardEvaluation) string {
 		return reasonCode
 	}
 	return "prompt_policy_warning"
-}
-
-func (h *Handler) logPromptFilterVerdict(c *gin.Context, endpoint string, model string, source string, errorCode string, verdict promptfilter.Verdict) {
-	h.logPromptFilterVerdictWithDecision(c, endpoint, model, source, errorCode, verdict, nil, nil)
 }
 
 func (h *Handler) logPromptGuardEvaluation(c *gin.Context, endpoint string, model string, source string, errorCode string, evaluation promptGuardEvaluation) {
@@ -458,18 +408,6 @@ func (h *Handler) buildPromptFilterLogInput(auditContext promptFilterAuditContex
 
 func promptFilterDecisionRequiresAudit(decision *promptfilter.Decision) bool {
 	return decision != nil && decision.ReasonCode == promptfilter.ReasonCodeAdapterUnclassified
-}
-
-func (h *Handler) populateVerifiedNewAPIAuditMeta(c *gin.Context, input *database.PromptFilterLogInput) {
-	if h == nil || h.store == nil || c == nil || input == nil {
-		return
-	}
-	cfg := h.promptFilterConfigForRequest(c)
-	policyContext, verified := h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, ingressRequestBody(c, nil))
-	if !verified || !policyContext.AuditMetaVerified {
-		return
-	}
-	applyVerifiedNewAPIAuditMeta(policyContext, input)
 }
 
 func (h *Handler) populateCachedVerifiedNewAPIAuditMeta(c *gin.Context, input *database.PromptFilterLogInput) {

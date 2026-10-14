@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -148,13 +147,6 @@ func antigravityLogicalCompatibilityModel(model string) (antigravityPublicModelD
 // antigravityCompatibilityAlias is retained for internal/test compatibility
 // with older callers that treated fixed-tier IDs as aliases. They are now
 // first-class public IDs, but still resolve to the same fixed variant.
-func antigravityCompatibilityAlias(model string) (antigravityReasoningVariant, bool) {
-	definition, ok := antigravityPublicModel(model)
-	if !ok || len(definition.variants) != 1 {
-		return antigravityReasoningVariant{}, false
-	}
-	return definition.variants[0], true
-}
 
 func antigravityPublicModelIDs() []string {
 	models := make([]string, 0, len(antigravityPublicModelCatalog))
@@ -348,14 +340,6 @@ func antigravityResponsesTextModel(model string) bool {
 		!strings.Contains(name, "image-")
 }
 
-func antigravityCodexReasoningLevels(model string) []string {
-	definition, ok := antigravityPublicModel(model)
-	if !ok || len(definition.reasoningLevels) == 0 {
-		return nil
-	}
-	return append([]string(nil), definition.reasoningLevels...)
-}
-
 func antigravityVariantForDefinition(definition antigravityPublicModelDefinition, reasoning map[string]any) (antigravityReasoningVariant, bool) {
 	if len(definition.variants) == 0 {
 		return antigravityReasoningVariant{}, false
@@ -408,44 +392,11 @@ type AntigravityRedirectChoice struct {
 
 // AntigravityRedirectChoices lists every logical model that can carry a
 // redirect, in catalog order, with its tier IDs (`<model>-<level>`).
-func AntigravityRedirectChoices() []AntigravityRedirectChoice {
-	choices := make([]AntigravityRedirectChoice, 0, len(antigravityLogicalCompatibilityCatalog))
-	for _, logical := range antigravityLogicalCompatibilityCatalog {
-		tiers := make([]string, 0, len(logical.variants))
-		for _, variant := range logical.variants {
-			tier := logical.id + "-" + variant.level
-			if _, ok := antigravityPublicModel(tier); ok {
-				tiers = append(tiers, tier)
-			}
-		}
-		choices = append(choices, AntigravityRedirectChoice{Model: logical.id, DefaultLevel: logical.defaultReasoningLevel, Tiers: tiers})
-	}
-	return choices
-}
 
 // ValidateAntigravityModelRedirects checks that every redirect maps a bare
 // logical model to one of its own fixed tiers. Anything else (a tier as the
 // key, a tier of a different model, a raw wire ID) is rejected so the
 // settings page cannot persist a rule the adapter would silently ignore.
-func ValidateAntigravityModelRedirects(redirects map[string]string) error {
-	for model, target := range redirects {
-		logical, ok := antigravityLogicalCompatibilityModel(model)
-		if !ok {
-			return fmt.Errorf("model %q is not a redirectable logical model", model)
-		}
-		valid := false
-		for _, variant := range logical.variants {
-			if strings.EqualFold(strings.TrimSpace(target), logical.id+"-"+variant.level) {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			return fmt.Errorf("model %q cannot be redirected to %q", model, target)
-		}
-	}
-	return nil
-}
 
 // antigravityRedirectedModel resolves the configured fixed tier for a bare
 // logical model. By default the redirect only fills in a missing

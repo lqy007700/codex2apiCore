@@ -3,12 +3,11 @@ package proxy
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
+
 	"testing"
 	"time"
 
 	"github.com/codex2api/auth"
-	"github.com/gin-gonic/gin"
 )
 
 func TestClaudeFirstTokenTimeoutFor_PrefersClaudeSettingForClaudeAccounts(t *testing.T) {
@@ -61,50 +60,6 @@ func TestClaudeNativeFirstTokenOutcome_MapsGuardTimeoutToFirstTokenTimeout(t *te
 	if got := claudeNativeFirstTokenOutcome(nil, 0, broken, 0); got.failureKind != "" {
 		t.Fatalf("nil guard must keep the original outcome: %+v", got)
 	}
-}
-
-func TestActivateClaudeStreamKeepalive(t *testing.T) {
-	store := auth.NewStore(nil, nil, nil)
-	defer store.Stop()
-	claude := &auth.Account{DBID: 251, UpstreamType: auth.UpstreamClaude}
-	codex := &auth.Account{DBID: 1}
-
-	newCtx := func() (*gin.Context, func()) {
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-		stop := installContinuousRetrySSEKeepalive(c, true, "text/event-stream; charset=utf-8")
-		return c, stop
-	}
-
-	c, stop := newCtx()
-	activateClaudeStreamKeepalive(c.Request.Context(), store, claude, true)
-	if !continuousRetryKeepaliveActive(c.Request.Context()) {
-		t.Fatal("claude stream must activate the pre-first-token keepalive")
-	}
-	stop()
-
-	c, stop = newCtx()
-	activateClaudeStreamKeepalive(c.Request.Context(), store, codex, true)
-	if continuousRetryKeepaliveActive(c.Request.Context()) {
-		t.Fatal("non-claude account must not activate the keepalive")
-	}
-	stop()
-
-	c, stop = newCtx()
-	activateClaudeStreamKeepalive(c.Request.Context(), store, claude, false)
-	if continuousRetryKeepaliveActive(c.Request.Context()) {
-		t.Fatal("non-stream request must not activate the keepalive")
-	}
-	stop()
-
-	store.SetClaudeStreamKeepaliveEnabled(false)
-	c, stop = newCtx()
-	activateClaudeStreamKeepalive(c.Request.Context(), store, claude, true)
-	if continuousRetryKeepaliveActive(c.Request.Context()) {
-		t.Fatal("disabled switch must not activate the keepalive")
-	}
-	stop()
 }
 
 func TestClaudeFirstTokenSlow(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+
 	"log"
 	"net/http"
 	"sort"
@@ -177,26 +177,6 @@ func (h *Handler) GetGrokAccountState(c *gin.Context) {
 
 // SyncGrokAccountState refreshes the read-only control plane and rich model
 // catalog. Upstream partial failures are reported without erasing prior facts.
-func (h *Handler) SyncGrokAccountState(c *gin.Context) {
-	id, ok := parseGrokAdminAccountID(c)
-	if !ok {
-		return
-	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 110*time.Second)
-	defer cancel()
-	result, err := h.syncGrokAccountState(ctx, id)
-	if err != nil {
-		writeGrokAdminError(c, err)
-		return
-	}
-	if result.capabilityGeneration > 0 {
-		h.triggerGrokCapabilityProbeForGeneration(id, result.capabilityGeneration)
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Grok 控制面与模型目录同步完成", "state": result.State,
-		"models": result.Models, "synced_facts": result.SyncedFacts, "errors": result.Errors,
-	})
-}
 
 func factStatus(status int) string {
 	switch status {
@@ -785,23 +765,6 @@ func mustJSON(value any) []byte {
 
 // ProbeGrokAccountCapabilities forces a fresh minimal request to every native
 // endpoint for each visible catalog model.
-func (h *Handler) ProbeGrokAccountCapabilities(c *gin.Context) {
-	id, ok := parseGrokAdminAccountID(c)
-	if !ok {
-		return
-	}
-	response, err := h.runGrokCapabilityProbe(c.Request.Context(), id, true)
-	if err != nil {
-		writeGrokAdminError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Grok 三协议能力探测完成", "state": response.State, "results": response.Results})
-}
-
-func accountProbeLock(id int64) chan struct{} {
-	lock, _ := grokCapabilityAccountLocks.LoadOrStore(id, make(chan struct{}, 1))
-	return lock.(chan struct{})
-}
 
 type grokCapabilityProbeTarget struct {
 	model        string
@@ -931,98 +894,6 @@ func grokGenerationNeedsCapabilityProbe(account *auth.Account, state *database.G
 	return false
 }
 
-func (h *Handler) runGrokCapabilityProbe(ctx context.Context, id int64, force bool) (*grokCapabilityProbeResponse, error) {
-	lock := accountProbeLock(id)
-	select {
-	case lock <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	defer func() { <-lock }()
-	select {
-	case grokCapabilitySlots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	defer func() { <-grokCapabilitySlots }()
-
-	account, row, err := h.grokAdminAccount(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	state, err := h.db.GetGrokAccountState(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	generation := row.CredentialGeneration
-	targets, _ := grokCapabilityProbeTargets(account, state, generation)
-	existing := map[string]database.GrokModelCapability{}
-	for _, capability := range state.Capabilities {
-		key := grokCapabilityProbeKey(capability.ModelID, capability.Origin, capability.Protocol)
-		existing[key] = capability
-	}
-	protocols := []proxy.GrokProtocol{proxy.GrokProtocolResponses, proxy.GrokProtocolChatCompletions, proxy.GrokProtocolMessages}
-	response := &grokCapabilityProbeResponse{}
-	for _, target := range targets {
-		for _, protocol := range protocols {
-			key := grokCapabilityProbeKey(target.model, target.origin, string(protocol))
-			if previous, ok := existing[key]; !force && ok && previous.CredentialGeneration == generation && time.Now().Before(previous.ExpiresAt) {
-				continue
-			}
-			probeCtx, cancel := context.WithTimeout(ctx, grokCapabilityProbeTimeout)
-			started := time.Now()
-			resp, requestErr := proxy.ExecuteGrokNativeProtocolProbeAtOriginWithHeaders(probeCtx, account, protocol, target.model, proxy.MinimalGrokProbeBody(protocol, target.model), target.origin, h.store.ResolveProxyForAccount(account), target.extraHeaders)
-			observation := inspectGrokProbeResponse(probeCtx, protocol, resp, requestErr, started)
-			cancel()
-			currentGeneration, _, generationErr := h.db.GetAccountCredentialState(ctx, id)
-			if generationErr != nil {
-				return nil, generationErr
-			}
-			if currentGeneration != generation {
-				return nil, errGrokCredentialChanged
-			}
-			observed := time.Now()
-			ttl := grokCapabilityFailureTTL
-			if observation.status == "ok" {
-				ttl = grokCapabilityOKTTL
-			}
-			capability := database.GrokModelCapability{
-				AccountID: id, ModelID: target.model, Origin: target.origin, Protocol: string(protocol),
-				CredentialGeneration: generation, Status: observation.status, HTTPStatus: observation.httpStatus,
-				ProviderCode: observation.providerCode, Source: "native_probe", RetryAfterSeconds: observation.retryAfter,
-				ObservedAt: observed, ExpiresAt: observed.Add(ttl),
-			}
-			applied, persistErr := h.db.UpsertGrokModelCapability(ctx, capability)
-			if persistErr != nil {
-				return nil, persistErr
-			}
-			if !applied {
-				return nil, errGrokCredentialChanged
-			}
-			_ = h.db.InsertUsageLog(context.Background(), &database.UsageLogInput{
-				AccountID: id, CredentialGeneration: generation, Channel: database.UpstreamChannelGrok, InternalReason: "grok_capability_probe",
-				Endpoint: grokProtocolPath(protocol), InboundEndpoint: grokProtocolPath(protocol), UpstreamEndpoint: grokProtocolPath(protocol),
-				Model: target.model, EffectiveModel: target.model, StatusCode: observation.httpStatus,
-				DurationMs: int(time.Since(started).Milliseconds()), FirstTokenMs: observation.firstTokenMs,
-				InputTokens: observation.inputTokens, OutputTokens: observation.outputTokens,
-				PromptTokens: observation.inputTokens, CompletionTokens: observation.outputTokens,
-				TotalTokens:     observation.inputTokens + observation.outputTokens,
-				ReasoningTokens: observation.reasoningTokens, Stream: true,
-			})
-			response.Results = append(response.Results, grokCapabilityProbeResult{
-				ModelID: target.model, Protocol: string(protocol), Status: observation.status,
-				HTTPStatus: observation.httpStatus, ProviderCode: observation.providerCode,
-				RetryAfterSeconds: observation.retryAfter, ObservedAt: observed,
-			})
-		}
-	}
-	if err := h.store.ReloadGrokPersistentState(ctx, id); err != nil {
-		return nil, err
-	}
-	response.State, err = h.db.GetGrokAccountState(ctx, id)
-	return response, err
-}
-
 type grokProbeObservation struct {
 	status                                     string
 	httpStatus                                 int
@@ -1030,17 +901,6 @@ type grokProbeObservation struct {
 	retryAfter                                 int64
 	inputTokens, outputTokens, reasoningTokens int
 	firstTokenMs                               int
-}
-
-func grokProtocolPath(protocol proxy.GrokProtocol) string {
-	switch protocol {
-	case proxy.GrokProtocolChatCompletions:
-		return "/v1/chat/completions"
-	case proxy.GrokProtocolMessages:
-		return "/v1/messages"
-	default:
-		return "/v1/responses"
-	}
 }
 
 func sanitizeGrokProviderCode(value string) string {
@@ -1066,198 +926,23 @@ func providerCodeFromJSON(data []byte) string {
 	return ""
 }
 
-func classifyProbeStatus(status int, code string) string {
-	if status == http.StatusUnauthorized {
-		return "unauthorized"
-	}
-	if status == http.StatusForbidden {
-		return "subscription_required"
-	}
-	if status == http.StatusTooManyRequests {
-		return "rate_limited"
-	}
-	if status == http.StatusUpgradeRequired {
-		return "version_required"
-	}
-	lower := strings.ToLower(strings.TrimSpace(code))
-	explicitBalanceExhaustion := (strings.Contains(lower, "balance") || strings.Contains(lower, "credit")) &&
-		(strings.Contains(lower, "exhaust") || strings.Contains(lower, "insufficient") || strings.Contains(lower, "deplet"))
-	if status == http.StatusPaymentRequired {
-		if explicitBalanceExhaustion {
-			return "exhausted"
-		}
-		// A bare or generic 402 is not proof that prepaid/PAYG balance is
-		// exhausted (for example credit_card_required).
-		return "payment_required"
-	}
-	switch {
-	case strings.Contains(lower, "unauth"), strings.Contains(lower, "token"):
-		return "unauthorized"
-	case explicitBalanceExhaustion:
-		return "exhausted"
-	case strings.Contains(lower, "subscription"), strings.Contains(lower, "permission"), strings.Contains(lower, "forbidden"):
-		return "subscription_required"
-	case strings.Contains(lower, "rate"):
-		return "rate_limited"
-	case strings.Contains(lower, "version"), strings.Contains(lower, "upgrade"):
-		return "version_required"
-	default:
-		return "unavailable"
-	}
-}
+// A bare or generic 402 is not proof that prepaid/PAYG balance is
+// exhausted (for example credit_card_required).
 
 // grokProbeResponsesTerminalOK 判断 Responses 探针是否收到了"这口通了"的终态。
 // completed 与 incomplete 同为正常终态：探针体只给 1 个 output token，思考型
 // 模型必然以 incomplete 收场，把它排除在外等于永远判不出 ok。
 // status 取自非流式 body 的 response.status，eventType 取自流式事件的 type；
 // 调用方只关心其中一个时另一个传空串。
-func grokProbeResponsesTerminalOK(status, eventType string) bool {
-	switch status {
-	case "completed", "incomplete":
-		return true
-	}
-	switch eventType {
-	case "response.completed", "response.incomplete":
-		return true
-	}
-	return false
-}
 
-func retryAfterSeconds(header http.Header, now time.Time) int64 {
-	value := strings.TrimSpace(header.Get("Retry-After"))
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
-		return seconds
-	}
-	if at, err := http.ParseTime(value); err == nil && at.After(now) {
-		return int64(time.Until(at).Seconds())
-	}
-	return 0
-}
+// 探针体带 max_output_tokens:1，正常收尾必然是 incomplete 而非
+// completed；只认 completed 会把每个通的 Responses 口判成
+// unavailable（http_status=200 却 status=unavailable）。
 
-func updateProbeUsage(observation *grokProbeObservation, protocol proxy.GrokProtocol, data []byte) {
-	read := func(paths ...string) int {
-		for _, path := range paths {
-			if value := gjson.GetBytes(data, path); value.Exists() {
-				return int(value.Int())
-			}
-		}
-		return 0
-	}
-	switch protocol {
-	case proxy.GrokProtocolChatCompletions:
-		observation.inputTokens = max(observation.inputTokens, read("usage.prompt_tokens"))
-		observation.outputTokens = max(observation.outputTokens, read("usage.completion_tokens"))
-		observation.reasoningTokens = max(observation.reasoningTokens, read("usage.completion_tokens_details.reasoning_tokens"))
-	case proxy.GrokProtocolMessages:
-		observation.inputTokens = max(observation.inputTokens, read("message.usage.input_tokens", "usage.input_tokens"))
-		observation.outputTokens = max(observation.outputTokens, read("message.usage.output_tokens", "usage.output_tokens"))
-	default:
-		observation.inputTokens = max(observation.inputTokens, read("response.usage.input_tokens", "usage.input_tokens"))
-		observation.outputTokens = max(observation.outputTokens, read("response.usage.output_tokens", "usage.output_tokens"))
-		observation.reasoningTokens = max(observation.reasoningTokens, read("response.usage.output_tokens_details.reasoning_tokens", "usage.output_tokens_details.reasoning_tokens"))
-	}
-}
+// 同上：截断终态 response.incomplete 也是"这口通了"的证据。
 
-func inspectGrokProbeResponse(ctx context.Context, protocol proxy.GrokProtocol, resp *http.Response, requestErr error, startedAt time.Time) grokProbeObservation {
-	observation := grokProbeObservation{status: "unavailable"}
-	if requestErr != nil || resp == nil {
-		return observation
-	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
-	observation.httpStatus = resp.StatusCode
-	observation.retryAfter = retryAfterSeconds(resp.Header, time.Now())
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-		observation.providerCode = providerCodeFromJSON(body)
-		observation.status = classifyProbeStatus(resp.StatusCode, observation.providerCode)
-		return observation
-	}
-	streaming := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "event-stream")
-	if !streaming {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		updateProbeUsage(&observation, protocol, body)
-		observation.providerCode = providerCodeFromJSON(body)
-		switch protocol {
-		case proxy.GrokProtocolChatCompletions:
-			if gjson.GetBytes(body, "choices.0.finish_reason").String() != "" {
-				observation.status = "ok"
-			}
-		case proxy.GrokProtocolMessages:
-			if gjson.GetBytes(body, "type").String() == "message" && gjson.GetBytes(body, "stop_reason").String() != "" {
-				observation.status = "ok"
-			}
-		default:
-			// 探针体带 max_output_tokens:1，正常收尾必然是 incomplete 而非
-			// completed；只认 completed 会把每个通的 Responses 口判成
-			// unavailable（http_status=200 却 status=unavailable）。
-			if grokProbeResponsesTerminalOK(gjson.GetBytes(body, "status").String(), gjson.GetBytes(body, "type").String()) {
-				observation.status = "ok"
-			}
-		}
-		if observation.status != "ok" {
-			observation.status = classifyProbeStatus(resp.StatusCode, observation.providerCode)
-		}
-		if observation.status == "ok" && observation.firstTokenMs == 0 && !startedAt.IsZero() {
-			observation.firstTokenMs = max(int(time.Since(startedAt).Milliseconds()), 1)
-		}
-		return observation
-	}
-	var responsesCompleted, chatFinished, messagesStopReason, messagesStopped, failed bool
-	_ = proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
-		updateProbeUsage(&observation, protocol, data)
-		if observation.firstTokenMs == 0 && proxy.GrokStreamEventIsVisible(protocol, data) && !startedAt.IsZero() {
-			observation.firstTokenMs = max(int(time.Since(startedAt).Milliseconds()), 1)
-		}
-		eventType := gjson.GetBytes(data, "type").String()
-		switch protocol {
-		case proxy.GrokProtocolResponses:
-			// 同上：截断终态 response.incomplete 也是"这口通了"的证据。
-			if grokProbeResponsesTerminalOK("", eventType) && gjson.GetBytes(data, "response.status").String() != "failed" {
-				responsesCompleted = true
-			}
-			if eventType == "response.failed" || eventType == "error" {
-				failed = true
-			}
-		case proxy.GrokProtocolChatCompletions:
-			if gjson.GetBytes(data, "choices.0.finish_reason").String() != "" {
-				chatFinished = true
-			}
-			if eventType == "error" {
-				failed = true
-			}
-		case proxy.GrokProtocolMessages:
-			if eventType == "message_delta" && gjson.GetBytes(data, "delta.stop_reason").String() != "" {
-				messagesStopReason = true
-			}
-			if eventType == "message_stop" {
-				messagesStopped = true
-			}
-			if eventType == "error" {
-				failed = true
-			}
-		}
-		if failed && observation.providerCode == "" {
-			observation.providerCode = providerCodeFromJSON(data)
-		}
-		return !failed
-	})
-	if ctx.Err() != nil {
-		return observation
-	}
-	if !failed && (responsesCompleted || chatFinished || (messagesStopReason && messagesStopped)) {
-		observation.status = "ok"
-	} else {
-		observation.status = classifyProbeStatus(resp.StatusCode, observation.providerCode)
-	}
-	// Grok often emits the only visible token on the terminal frame. Without a
-	// prior delta, first_token_ms would stay 0 and the usage table shows 首字-.
-	if observation.status == "ok" && observation.firstTokenMs == 0 && !startedAt.IsZero() {
-		observation.firstTokenMs = max(int(time.Since(startedAt).Milliseconds()), 1)
-	}
-	return observation
-}
+// Grok often emits the only visible token on the terminal frame. Without a
+// prior delta, first_token_ms would stay 0 and the usage table shows 首字-.
 
 func (h *Handler) triggerGrokCapabilityProbeForGeneration(accountID, generation int64) {
 	if h == nil || h.db == nil || accountID <= 0 || generation <= 0 {
@@ -1278,13 +963,3 @@ func (h *Handler) triggerGrokCapabilityProbeForGeneration(accountID, generation 
 // low-cost native protocol probes used by the admin endpoints to local
 // acceptance harnesses. It intentionally addresses an explicit account ID and
 // therefore does not reserve/dispatch the account or bypass credential fencing.
-func (h *Handler) RunGrokAcceptanceSync(ctx context.Context, accountID int64) (*database.GrokAccountState, error) {
-	if _, err := h.syncGrokAccountState(ctx, accountID); err != nil {
-		return nil, err
-	}
-	result, err := h.runGrokCapabilityProbe(ctx, accountID, true)
-	if err != nil {
-		return nil, err
-	}
-	return result.State, nil
-}

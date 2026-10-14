@@ -494,20 +494,12 @@ func (h *Handler) nextRetryAccountForSession(ctx context.Context, affinityKey st
 	return h.nextRetryAccount(ctx, affinityKey, apiKeyID, exclusions, filter, false, auth.DispatchPolicyStandard)
 }
 
-func (h *Handler) nextRetryAccountForSessionWithDispatch(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter, policy auth.DispatchPolicy) (*auth.Account, string) {
-	return h.nextRetryAccount(ctx, affinityKey, apiKeyID, exclusions, filter, false, policy)
-}
-
 func (h *Handler) nextRetryAccountForSessionWithDispatchGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter, policy auth.DispatchPolicy) (*auth.Account, string, auth.SessionAffinityGuard, error) {
 	return h.nextRetryAccountWithGuard(ctx, affinityKey, apiKeyID, exclusions, filter, false, policy)
 }
 
 func (h *Handler) nextRetryAccountForSessionWithGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter) (*auth.Account, string, auth.SessionAffinityGuard, error) {
 	return h.nextRetryAccountWithGuard(ctx, affinityKey, apiKeyID, exclusions, filter, false, auth.DispatchPolicyStandard)
-}
-
-func (h *Handler) nextRetryAccountForContinuation(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter) (*auth.Account, string) {
-	return h.nextRetryAccount(ctx, affinityKey, apiKeyID, exclusions, filter, true, auth.DispatchPolicyStandard)
 }
 
 func (h *Handler) nextRetryAccountForContinuationWithDispatch(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter, policy auth.DispatchPolicy) (*auth.Account, string, error) {

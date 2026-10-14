@@ -200,6 +200,7 @@ type sqlExecer interface {
 
 // DB PostgreSQL 数据库操作
 type DB struct {
+	codexOnly         atomic.Bool
 	conn              *sql.DB
 	driver            string
 	authCacheScope    string
@@ -7176,6 +7177,9 @@ func (db *DB) ListActiveByChannel(ctx context.Context, channel string) ([]*Accou
 		upstreamTypeExpr = `LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), ''))`
 	}
 	where += accountChannelFilterSQL(channel, upstreamTypeExpr)
+	if db.codexOnly.Load() {
+		where += " AND " + upstreamTypeExpr + " IN ('', 'codex')"
+	}
 
 	query := `
 		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
@@ -8782,6 +8786,9 @@ func (db *DB) InsertOpenAIResponsesAccount(ctx context.Context, name string, cre
 // InsertAccountWithUpstream 插入一个指定 platform / type 的账号（用于 Grok 等
 // 非 Codex 上游），credentials 全量入库。
 func (db *DB) InsertAccountWithUpstream(ctx context.Context, name, platform, accountType string, credentials map[string]interface{}, proxyURL string) (int64, error) {
+	if db.codexOnly.Load() && !IsNativeCodexCredentials(credentials) {
+		return 0, fmt.Errorf("this service accepts native Codex accounts only")
+	}
 	if credentials == nil {
 		credentials = map[string]interface{}{}
 	}
@@ -8806,6 +8813,9 @@ func (db *DB) InsertAccountWithUpstream(ctx context.Context, name, platform, acc
 // insertAccountRowWithFamily keeps legacy insert SQL untouched while ensuring
 // every newly-created account immediately receives its stable family key.
 func (db *DB) insertAccountRowWithFamily(ctx context.Context, postgresQuery, sqliteQuery string, credentials map[string]interface{}, args ...interface{}) (int64, error) {
+	if db.codexOnly.Load() && !IsNativeCodexCredentials(credentials) {
+		return 0, fmt.Errorf("this service accepts native Codex accounts only")
+	}
 	candidate := credentialFamilyCandidate(credentials)
 	returnID := int64(0)
 	err := db.withSQLiteWriteLock(ctx, func() error {

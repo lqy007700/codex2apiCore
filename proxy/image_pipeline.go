@@ -13,15 +13,12 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/codex2api/database"
-	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/tidwall/gjson"
@@ -45,29 +42,6 @@ type imagePipelineGate struct{ slots chan struct{} }
 
 var processImagePipeline atomic.Pointer[imagePipelineGate]
 
-func ConfigureImagePipeline(limit int) {
-	if limit <= 0 {
-		processImagePipeline.Store(nil)
-		return
-	}
-	processImagePipeline.Store(&imagePipelineGate{slots: make(chan struct{}, limit)})
-}
-func NewImagePipeline(ctx context.Context, root string, jobID int64) (context.Context, *ImagePipeline, error) {
-	gate := processImagePipeline.Load()
-	if gate == nil {
-		return ctx, nil, nil
-	}
-	root = filepath.Join(root, "pipeline-tmp")
-	if err := os.MkdirAll(root, 0700); err != nil {
-		return ctx, nil, err
-	}
-	dir, err := os.MkdirTemp(root, "job-")
-	if err != nil {
-		return ctx, nil, err
-	}
-	p := &ImagePipeline{slots: gate.slots, dir: dir, jobID: jobID}
-	return context.WithValue(ctx, imagePipelineKey{}, p), p, nil
-}
 func pipelineFromContext(ctx context.Context) *ImagePipeline {
 	p, _ := ctx.Value(imagePipelineKey{}).(*ImagePipeline)
 	return p
@@ -130,66 +104,9 @@ func removePipelineFile(f *os.File) {
 
 // build runs only after reserving the memory budget. No caller holds a Base64
 // buffer across this call; the synthetic HTTP body is backed by a private file.
-func (h *Handler) GenerateQueuedImage(ctx context.Context, build func() ([]byte, error), edit bool, key *database.APIKeyRow) ([]byte, int, error) {
-	p := pipelineFromContext(ctx)
-	if p == nil {
-		return nil, 0, fmt.Errorf("image pipeline missing")
-	}
-	if err := p.Acquire(ctx); err != nil {
-		return nil, 0, err
-	}
-	file, err := buildPipelineInput(p, build)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer removePipelineFile(file)
-	recorder := newAdminImageResponseRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	endpoint := "/v1/images/generations"
-	if edit {
-		endpoint = "/v1/images/edits"
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, file)
-	if err != nil {
-		return nil, 0, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	if key != nil {
-		request.Header.Set("Authorization", "Bearer "+key.Key)
-		c.Set(contextAPIKeyRow, key)
-		c.Set(contextAPIKeyID, key.ID)
-		c.Set(contextAPIKeyName, key.Name)
-		c.Set(contextAPIKeyMasked, security.MaskAPIKey(key.Key))
-	}
-	c.Set(contextAPIKeyConcurrencyInherited, true)
-	c.Request = request
-	if status, msg := h.applyAdminScopeBudget(ctx, c, key); status != 0 {
-		return nil, status, fmt.Errorf("%s", msg)
-	}
-	if edit {
-		h.ImagesEdits(c)
-	} else {
-		h.ImagesGenerations(c)
-	}
-	body := recorder.Body.Bytes()
-	if recorder.Code < 200 || recorder.Code >= 300 {
-		message := extractAdminImageErrorMessage(body)
-		// Preserve the existing PNG-to-JPEG fallback for upstream failures, but
-		// never regenerate because local spooling or saving failed.
-		if strings.Contains(message, "cannot save generated image") || strings.Contains(message, "spool") {
-			return body, recorder.Code, fmt.Errorf("%s", message)
-		}
-		return nil, recorder.Code, fmt.Errorf("%s", message)
-	}
-	return body, recorder.Code, nil
-}
-func buildPipelineInput(p *ImagePipeline, build func() ([]byte, error)) (*os.File, error) {
-	body, err := build()
-	if err != nil {
-		return nil, err
-	}
-	return p.spool(body)
-}
+
+// Preserve the existing PNG-to-JPEG fallback for upstream failures, but
+// never regenerate because local spooling or saving failed.
 
 // The internal queue request has already passed prompt checks. Retain its text
 // and small metadata for later policy/usage logging, not embedded image bytes.
@@ -424,43 +341,4 @@ func (r *pipelineResponseReader) Read(b []byte) (int, error) {
 		r.err = nil
 	}
 	return n, err
-}
-
-func CleanupImagePipelineFiles(ctx context.Context, root string, cutoff time.Time) (int, error) {
-	root = filepath.Join(root, "pipeline-tmp")
-	entries, err := os.ReadDir(root)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return count, err
-		}
-		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasPrefix(entry.Name(), "job-") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return count, err
-		}
-		if !info.ModTime().Before(cutoff) {
-			continue
-		}
-		path := filepath.Join(root, entry.Name())
-		if filepath.Dir(path) != filepath.Clean(root) {
-			continue
-		}
-		if err = os.RemoveAll(path); err != nil {
-			return count, err
-		}
-		count++
-		if count >= 1000 {
-			break
-		}
-	}
-	return count, nil
 }

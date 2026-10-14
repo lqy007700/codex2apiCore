@@ -3270,10 +3270,6 @@ func sanitizeSchemaForUpstream(schema map[string]interface{}) {
 	ensureArrayItems(schema)
 }
 
-func sanitizeStructuredOutputSchemaForUpstream(schema map[string]interface{}) {
-	sanitizeStructuredOutputSchemaWithPolicy(schema, schemaNormalizationPolicy{})
-}
-
 func sanitizeStructuredOutputSchemaWithPolicy(schema map[string]interface{}, policy schemaNormalizationPolicy) {
 	stripUnsupportedSchemaKeysWithPolicy(schema, policy)
 	normalizeSchemaRequiredFields(schema)
@@ -3437,10 +3433,6 @@ func responsesTextFormatFromResponseFormat(responseFormat map[string]any) map[st
 	default:
 		return nil
 	}
-}
-
-func sanitizeStructuredOutputSchema(format map[string]any) bool {
-	return sanitizeStructuredOutputFormatWithPolicy(format, schemaNormalizationPolicy{})
 }
 
 func sanitizeStructuredOutputFormatWithPolicy(format map[string]any, policy schemaNormalizationPolicy) bool {
@@ -3864,15 +3856,6 @@ func isCodexToolInputDeltaEvent(eventType string) bool {
 	}
 }
 
-func isCodexToolInputDoneEvent(eventType string) bool {
-	switch eventType {
-	case "response.function_call_arguments.done", "response.custom_tool_call_input.done":
-		return true
-	default:
-		return false
-	}
-}
-
 // newToolCallAnnouncementChunk 构建 tool call 首块（含 id、type、function.name）
 func newToolCallAnnouncementChunk(id, model string, created int64, tcIndex int, callID, funcName string) []byte {
 	chunk := openAIStreamChunk{
@@ -3921,9 +3904,6 @@ func newToolCallDeltaChunk(id, model string, created int64, tcIndex int, argsDel
 // {"index":0,"delta":{},"finish_reason":"stop"},严格反序列化的客户端
 // (Rust/serde 系)把 delta 当必填字段,缺失会直接报
 // "missing field `delta`" 并让整轮对话失败。
-func newFinalChunk(id, model string, created int64, finishReason string, usage *UsageInfo) []byte {
-	return newFinalChunkWithTier(id, model, created, finishReason, usage, "")
-}
 
 // newFinalChunkWithTier 在终结块上附带上游实际 service_tier（空则省略）。
 func newFinalChunkWithTier(id, model string, created int64, finishReason string, usage *UsageInfo, serviceTier string) []byte {
@@ -3975,11 +3955,6 @@ func newChatStreamTranslation(eventType string, chunk []byte, terminal bool) Cha
 // TranslateStreamChunkResult is the terminal-aware form of
 // TranslateStreamChunk. Existing callers that only need the historical
 // (chunk, done) pair can keep using TranslateStreamChunk.
-func TranslateStreamChunkResult(eventData []byte, model string, chunkID string, created int64) ChatStreamTranslation {
-	eventType := gjson.GetBytes(eventData, "type").String()
-	chunk, terminal := TranslateStreamChunk(eventData, model, chunkID, created)
-	return newChatStreamTranslation(eventType, chunk, terminal)
-}
 
 // TranslateStreamChunk 将 Codex SSE 数据块翻译为 OpenAI Chat Completions 流式格式（无状态）
 func TranslateStreamChunk(eventData []byte, model string, chunkID string, created int64) ([]byte, bool) {
@@ -4352,70 +4327,9 @@ func (st *StreamTranslator) TranslateParsed(parsed gjson.Result) ([]byte, bool) 
 // ==================== 非流式响应翻译 ====================
 
 // TranslateCompactResponse 将 Codex 非流式响应转换为 OpenAI 格式
-func TranslateCompactResponse(responseData []byte, model string, id string) []byte {
-	var outputText, reasoningText string
-	output := gjson.GetBytes(responseData, "output")
-	if output.IsArray() {
-		output.ForEach(func(_, item gjson.Result) bool {
-			switch item.Get("type").String() {
-			case "message":
-				content := item.Get("content")
-				if content.IsArray() {
-					content.ForEach(func(_, part gjson.Result) bool {
-						if part.Get("type").String() == "output_text" {
-							outputText += part.Get("text").String()
-						}
-						return true
-					})
-				}
-			case "reasoning":
-				// Codex 在 response.output 里把思考过程作为 reasoning item,
-				// content/summary 数组下每个元素是 {type, text} 形式。
-				summary := item.Get("summary")
-				if summary.IsArray() {
-					summary.ForEach(func(_, part gjson.Result) bool {
-						reasoningText += part.Get("text").String()
-						return true
-					})
-				}
-				content := item.Get("content")
-				if content.IsArray() {
-					content.ForEach(func(_, part gjson.Result) bool {
-						reasoningText += part.Get("text").String()
-						return true
-					})
-				}
-			}
-			return true
-		})
-	}
 
-	usage := extractUsage(responseData)
-
-	msg := compactMessage{
-		Role:    "assistant",
-		Content: &outputText,
-	}
-	if reasoningText != "" {
-		r := reasoningText
-		msg.Reasoning = &r
-		msg.ReasoningContent = &r
-	}
-
-	resp := openAICompactResponse{
-		ID:     id,
-		Object: "chat.completion",
-		Model:  model,
-		Choices: []compactChoice{{
-			Index:        0,
-			Message:      msg,
-			FinishReason: "stop",
-		}},
-		Usage: usage,
-	}
-	b, _ := json.Marshal(resp)
-	return b
-}
+// Codex 在 response.output 里把思考过程作为 reasoning item,
+// content/summary 数组下每个元素是 {type, text} 形式。
 
 // BuildCompactResponse 构建非流式完整响应（供 handler.go 调用，替代内联 sjson）
 // 当有 toolCalls 且 content 为空时，content 输出为 JSON null

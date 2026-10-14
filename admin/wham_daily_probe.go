@@ -69,135 +69,30 @@ var whamDailyUsageProbeOnce sync.Once
 // 上游 daily-workspace-usage-counts 可回溯深度有限（实测约 84 天），更久的历史只在
 // 本地库里，所以这个任务是长期历史的唯一来源。稳态每轮滚动回补 7 天，首次同步
 // 深回补 84 天，漏跑几轮不会留下空洞。
-func (h *Handler) StartWhamDailyUsageProbe(ctx context.Context) {
-	if h == nil || h.db == nil || h.store == nil {
-		return
-	}
-	whamDailyUsageProbeOnce.Do(func() {
-		go func() {
-			// 启动后先等一会：避开进程刚起来时的账号加载与刷新高峰。
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Minute):
-			}
-			// lastAttempt 只在这个循环 goroutine 里读写，不需要锁。
-			// 记录的是尝试时间而非成功时间：失败也等下一个整间隔再试，
-			// 避免坏号每跳都打一次上游。
-			lastAttempt := map[int64]time.Time{}
-			h.runWhamDailyUsageProbe(ctx, lastAttempt)
-			ticker := time.NewTicker(whamDailyUsageProbeTick)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					h.runWhamDailyUsageProbe(ctx, lastAttempt)
-				}
-			}
-		}()
-	})
-}
+
+// 启动后先等一会：避开进程刚起来时的账号加载与刷新高峰。
+
+// lastAttempt 只在这个循环 goroutine 里读写，不需要锁。
+// 记录的是尝试时间而非成功时间：失败也等下一个整间隔再试，
+// 避免坏号每跳都打一次上游。
 
 // whamDailyUsageProbeIntervalFor 按账号当前状态给出刷新间隔：限流/额度耗尽的
 // 账号额度短期不会变化，降频到 6 小时；其余账号按小时刷新。
-func whamDailyUsageProbeIntervalFor(account *auth.Account) time.Duration {
-	switch account.RuntimeStatus() {
-	case "rate_limited", auth.ResponsesRateLimitedCooldownReason, "rate_limited_7d", "usage_limited", "usage_limit", "usage_exhausted":
-		return whamDailyUsageProbeRateLimitedInterval
-	}
-	return whamDailyUsageProbeBaseInterval
-}
 
 // whamDailyUsageDueTargets 从候选账号里挑出到期该刷的，并就地维护 lastAttempt
 // 计时表（记录本轮尝试、清掉已不存在的账号）。
-func whamDailyUsageDueTargets(all []*auth.Account, lastAttempt map[int64]time.Time, now time.Time) []*auth.Account {
-	targets := make([]*auth.Account, 0, len(all))
-	current := make(map[int64]struct{}, len(all))
-	for _, account := range all {
-		current[account.DBID] = struct{}{}
-		// 减去半个 tick 的裕量：不然 1h 间隔恰好落在 1h tick 边界上，
-		// 计时误差会让账号每次都差一点点到期、实际两小时才刷一次。
-		due := whamDailyUsageProbeIntervalFor(account) - whamDailyUsageProbeTick/2
-		if last, ok := lastAttempt[account.DBID]; ok && now.Sub(last) < due {
-			continue
-		}
-		lastAttempt[account.DBID] = now
-		targets = append(targets, account)
-	}
-	// 已删除的账号从计时表清掉，防止长期运行下缓慢泄漏。
-	for id := range lastAttempt {
-		if _, ok := current[id]; !ok {
-			delete(lastAttempt, id)
-		}
-	}
-	return targets
-}
 
-func (h *Handler) runWhamDailyUsageProbe(ctx context.Context, lastAttempt map[int64]time.Time) {
-	// 先把缺工作区的 PAT 补全，补上的账号本轮就能进候选。(issue #662)
-	h.hydratePATWorkspaces(ctx)
-	all := h.whamDailyUsageProbeTargets()
-	if len(all) == 0 {
-		return
-	}
-	targets := whamDailyUsageDueTargets(all, lastAttempt, time.Now())
-	if len(targets) == 0 {
-		return
-	}
-	started := time.Now()
-	var (
-		wg        sync.WaitGroup
-		mu        sync.Mutex
-		okCount   int
-		failCount int
-	)
-	sem := make(chan struct{}, whamDailyUsageProbeConcurrency)
-	for _, account := range targets {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		go func(acc *auth.Account) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
+// 减去半个 tick 的裕量：不然 1h 间隔恰好落在 1h tick 边界上，
+// 计时误差会让账号每次都差一点点到期、实际两小时才刷一次。
 
-			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			outcome, err := h.syncWhamDailyUsage(reqCtx, acc)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				failCount++
-				// 401 在这里不裁决账号状态：wham 侧鉴权失败不代表账号不可用
-				// （与 usage 探针的既有语义一致），只记录等下一轮。
-				log.Printf("官方用量快照失败 account=%d: %v", acc.DBID, err)
-				return
-			}
-			okCount++
-			// 拆分端点失败不算整体失败：counts 已落库，份额下一轮再补。
-			if outcome.BreakdownErr != nil {
-				log.Printf("官方模型拆分快照失败 account=%d: %v", acc.DBID, outcome.BreakdownErr)
-			}
-		}(account)
-	}
-	wg.Wait()
+// 已删除的账号从计时表清掉，防止长期运行下缓慢泄漏。
 
-	if okCount > 0 {
-		pruneCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		if err := h.db.PruneAccountDailyUsage(pruneCtx, whamDailyUsageKeepDays); err != nil {
-			log.Printf("清理官方用量快照失败: %v", err)
-		}
-		cancel()
-	}
-	log.Printf("官方用量快照完成 成功=%d 失败=%d 耗时=%s", okCount, failCount, time.Since(started).Round(time.Millisecond))
-}
+// 先把缺工作区的 PAT 补全，补上的账号本轮就能进候选。(issue #662)
+
+// 401 在这里不裁决账号状态：wham 侧鉴权失败不代表账号不可用
+// （与 usage 探针的既有语义一致），只记录等下一轮。
+
+// 拆分端点失败不算整体失败：counts 已落库，份额下一轮再补。
 
 // enqueueWhamDailyUsageBackfill 给当前页缺少官方结算快照的账号补一次上游拉取。
 // 后台小时级探针会覆盖全池，但列表打开时快照往往还是空的：page-stats 只读本地表，
@@ -373,18 +268,3 @@ func (h *Handler) runWhamDailyUsageBackfill(accounts []*auth.Account) {
 
 // whamDailyUsageProbeTargets 挑出该拉统计的账号：只有 OAuth 登录的 Codex 账号
 // 才有 wham analytics 端点权限，codex_at、中转和 Grok 账号没有。
-func (h *Handler) whamDailyUsageProbeTargets() []*auth.Account {
-	if h == nil || h.store == nil {
-		return nil
-	}
-	accounts := h.store.Accounts()
-	out := make([]*auth.Account, 0, len(accounts))
-	now := time.Now()
-	for _, account := range accounts {
-		if !whamDailyUsageAutoRefreshEligible(account, now) {
-			continue
-		}
-		out = append(out, account)
-	}
-	return out
-}

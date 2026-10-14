@@ -108,10 +108,6 @@ func waitNativeWSCommit(ctx context.Context, owner, responseID string) error {
 	}
 }
 
-func nativeWSReplayItem(item gjson.Result) (json.RawMessage, *api.APIError) {
-	return nativeWSReplayItemChecked(item, false)
-}
-
 func nativeWSReplayItemChecked(item gjson.Result, allowOpaque bool) (json.RawMessage, *api.APIError) {
 	if (item.Get("encrypted_content").String() != "" && !allowOpaque) || item.Get("type").String() == "item_reference" {
 		return nil, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusConflict, "nonportable_context"))

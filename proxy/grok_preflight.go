@@ -42,9 +42,6 @@ var grokDroppedTopLevelFields = map[string]struct{}{
 // 展平、web_search 降级、历史项按原生契约重建、Codex 专属顶层字段剥离、思考强度
 // 钳制、无工具时撤掉 tool_choice，并顺带算出轮次序号与模型名。
 // 请求体非法 JSON 或顶层不是对象时原样返回，交由上游报错。
-func prepareGrokUpstreamBody(body []byte) grokPreflightResult {
-	return prepareGrokUpstreamBodyWithCompaction(body, nil, nil)
-}
 
 func prepareGrokUpstreamBodyWithCompaction(body []byte, preservedCompaction compactionProvenanceDigests, reasoningMenu []string) grokPreflightResult {
 	if lifted, changed := liftGrokAdditionalTools(body); changed {

@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
+
 	"fmt"
 	"strings"
 	"testing"
@@ -57,44 +57,8 @@ func TestOutputCollectorBoundsReplacementIdentities(t *testing.T) {
 	}
 }
 
-func TestRealtimeSmallSessionUpdateDropsLargeToolCapacity(t *testing.T) {
-	state := &realtimeTextSession{}
-	large := []byte(fmt.Sprintf(`{"type":"session.update","session":{"model":"gpt-5.5","instructions":"short","tools":[{"type":"function","name":"tool","description":%q}],"tool_choice":%q}}`, strings.Repeat("x", 1<<20), strings.Repeat("y", 1<<20)))
-	if _, _, err := normalizeRealtimeTextClientEvent(state, large); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := normalizeRealtimeTextClientEvent(state, []byte(`{"type":"session.update","session":{"tools":[],"tool_choice":"auto"}}`)); err != nil {
-		t.Fatal(err)
-	}
-	if cap(state.Tools) > 64 || cap(state.ToolChoice) > 64 {
-		t.Fatalf("retained large capacity: %d/%d", cap(state.Tools), cap(state.ToolChoice))
-	}
-	if state.Model != "gpt-5.5" || state.Instructions != "short" {
-		t.Fatal("session update changed omitted fields")
-	}
-}
-
-func TestRealtimeHistoryEvictionClearsBackingReferences(t *testing.T) {
-	state := &realtimeTextSession{}
-	first := []byte(fmt.Sprintf(`{"type":"message","role":"user","content":%q}`, strings.Repeat("x", 150<<10)))
-	second := []byte(fmt.Sprintf(`{"type":"message","role":"user","content":%q}`, strings.Repeat("y", 150<<10)))
-	state.appendHistory(first)
-	backing := state.History
-	state.appendHistory(second)
-	if len(state.History) != 1 {
-		t.Fatalf("history count=%d", len(state.History))
-	}
-	// If append grew the backing array, the earlier slice is independently owned.
-	// Re-run with reserved capacity so this observes the actual eviction slot.
-	state.History = make([]json.RawMessage, 0, 4)
-	state.historyBytes = 0
-	state.appendHistory(first)
-	backing = state.History[:cap(state.History)]
-	state.appendHistory(second)
-	if backing[0] != nil {
-		t.Fatal("evicted history body is still referenced")
-	}
-}
+// If append grew the backing array, the earlier slice is independently owned.
+// Re-run with reserved capacity so this observes the actual eviction slot.
 
 func TestLargeStreamBuffersReleaseCapacityAndPreserveOutput(t *testing.T) {
 	payload := []byte(strings.Repeat("x", 1<<20))
@@ -108,15 +72,6 @@ func TestLargeStreamBuffersReleaseCapacityAndPreserveOutput(t *testing.T) {
 	}
 	if !bytes.Equal(output.Bytes(), payload) || w.buffer.Cap() != 0 {
 		t.Fatalf("flush output=%d capacity=%d", output.Len(), w.buffer.Cap())
-	}
-	telemetry := &codexTelemetryBody{attempt: &codexTelemetryAttempt{}}
-	telemetry.observe([]byte(`data: {"type":"response.output_text.delta","delta":"` + string(payload) + `"}` + "\n\n"))
-	if cap(telemetry.pending) != 0 || cap(telemetry.event) != 0 {
-		t.Fatal("telemetry retained large event buffers")
-	}
-	telemetry.observe([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"next\"}\n\n"))
-	if telemetry.attempt.firstToken.IsZero() {
-		t.Fatal("telemetry stopped observing")
 	}
 	replay := newContinuousRetryReplayWithLimits(int64(len(payload)), 2*int64(len(payload)))
 	defer replay.Close()

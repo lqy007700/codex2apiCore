@@ -108,12 +108,6 @@ func readLinuxCPUTicks() (uint64, uint64, error) {
 	return total, idle, nil
 }
 
-func readSystemMemory() (usedBytes uint64, totalBytes uint64, percent float64) {
-	var mem runtime.MemStats
-	runtime.ReadMemStats(&mem)
-	return readSystemMemoryWithFallback(&mem)
-}
-
 func readSystemMemoryWithFallback(mem *runtime.MemStats) (usedBytes uint64, totalBytes uint64, percent float64) {
 	if runtime.GOOS == "linux" {
 		file, err := os.Open("/proc/meminfo")
@@ -187,11 +181,6 @@ func parseLinuxProcessRSS(r io.Reader) (uint64, bool) {
 // runtime.MemStats.Sys 是 Go 运行时从 OS 申请/保留过的虚拟内存总量，包含已空闲
 // 甚至已归还的堆页，流量峰值过后仍会保持高水位，不能当成当前进程内存展示。
 // Linux/Docker 使用 /proc/self/status 的 VmRSS；非 Linux 才回退到 Sys。
-func readProcessMemory() uint64 {
-	var mem runtime.MemStats
-	runtime.ReadMemStats(&mem)
-	return readProcessMemoryWithFallback(&mem)
-}
 
 func readProcessMemoryWithFallback(mem *runtime.MemStats) uint64 {
 	if runtime.GOOS == "linux" {

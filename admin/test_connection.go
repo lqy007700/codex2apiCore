@@ -464,13 +464,6 @@ func buildConnectionTestPayload(store *auth.Store, model string) []byte {
 // shape used by Claude OAuth accounts. Keeping this separate from the
 // Responses test payload prevents an imported Claude token from ever being
 // sent through an OpenAI-shaped probe.
-func buildClaudeConnectionTestPayload(store *auth.Store, model string, securityCfg auth.ClaudeSecurityConfig) []byte {
-	content := auth.DefaultTestContent
-	if store != nil {
-		content = store.GetTestContent()
-	}
-	return buildClaudeConnectionTestPayloadWithContent(model, auth.RenderTestContent(content), securityCfg)
-}
 
 // buildAccountConnectionTestPayload 按账号渠道构造测连请求体：Claude 走原生 Messages
 // 形状，其余走 Responses 形状；用户输入取渠道自定义测活内容，留空沿用全局。
@@ -733,9 +726,6 @@ func claudeConnectionTestShouldPreserveUsageCooldown(account *auth.Account, resp
 }
 
 // buildTestPayload 构建默认最小测试请求体
-func buildTestPayload(model string) []byte {
-	return buildTestPayloadWithContent(model, auth.DefaultTestContent)
-}
 
 // buildTestPayloadWithContent 构建带自定义用户输入内容的最小测试请求体
 func buildTestPayloadWithContent(model string, content string) []byte {
@@ -929,18 +919,6 @@ func formatUpstreamEventDetail(message string, data []byte) string {
 		}
 	}
 	return message + "\n\n上游事件:\n" + truncate(detail, 3000)
-}
-
-func isSupportedConnectionTestModel(model string) bool {
-	if strings.Contains(strings.ToLower(model), "image") {
-		return false
-	}
-	for _, supported := range proxy.SupportedModels {
-		if model == supported {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *Handler) connectionTestModel(ctx context.Context) string {

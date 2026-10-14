@@ -74,6 +74,9 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			COALESCE(json_extract(credentials, '$.subscription_grace_until'), '')`
 	}
 	where += accountChannelFilterSQL(channel, upstreamExpr)
+	if db.codexOnly.Load() {
+		where += " AND " + upstreamExpr + " IN ('', 'codex')"
+	}
 	query := `SELECT id, name, type, proxy_url, status, cooldown_reason, cooldown_until,
 		COALESCE(error_message, ''), COALESCE(enabled, true), COALESCE(locked, false),
 		score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), created_at, updated_at,

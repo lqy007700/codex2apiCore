@@ -11,7 +11,6 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
-	"github.com/google/uuid"
 )
 
 type liveSession struct {
@@ -46,34 +45,8 @@ func (h *Handler) liveCalls() *liveCallStore {
 	return h.liveStore
 }
 
-func (s *liveCallStore) save(ctx context.Context, record *liveCallRecord, account *auth.Account, releaseKey func()) error {
-	if s == nil || record == nil {
-		return fmt.Errorf("live store unavailable")
-	}
-	if err := s.acquireLeases(ctx, record); err != nil {
-		return err
-	}
-	// Promote the controller before the record is published: once the session
-	// is in the map, the record is shared and may only be mutated under s.mu.
-	record.Controller = liveControllerObserver
-	if err := s.persist(ctx, record); err != nil {
-		s.releaseLeases(ctx, record)
-		return err
-	}
-	watchCtx, cancel := context.WithCancel(context.Background())
-	session := &liveSession{
-		record:     record,
-		account:    account,
-		releaseKey: releaseKey,
-		reserved:   account != nil,
-		cancel:     cancel,
-	}
-	s.mu.Lock()
-	s.sessions[record.CallHash] = session
-	s.mu.Unlock()
-	go s.watch(watchCtx, session)
-	return nil
-}
+// Promote the controller before the record is published: once the session
+// is in the map, the record is shared and may only be mutated under s.mu.
 
 func (s *liveCallStore) get(ctx context.Context, callID string) (*liveCallRecord, *liveSession, error) {
 	if s == nil {
@@ -101,28 +74,6 @@ func (s *liveCallStore) get(ctx context.Context, callID string) (*liveCallRecord
 		return nil, nil, errLiveCallNotFound
 	}
 	return record, session, nil
-}
-
-func (s *liveCallStore) claimProxy(ctx context.Context, record *liveCallRecord) (string, bool, error) {
-	if record == nil {
-		return "", false, errLiveCallNotFound
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current := record
-	if session := s.sessions[record.CallHash]; session != nil && session.record != nil {
-		current = session.record
-	}
-	if current.Controller == liveControllerClosed || current.Controller == liveControllerProxy {
-		return "", false, nil
-	}
-	owner := uuid.NewString()
-	current.Controller = liveControllerProxy
-	current.ControllerOwner = owner
-	if err := s.persistLocked(ctx, current); err != nil {
-		return "", false, err
-	}
-	return owner, true, nil
 }
 
 func (s *liveCallStore) finalize(record *liveCallRecord) {
@@ -166,39 +117,6 @@ func (s *liveCallStore) finalize(record *liveCallRecord) {
 	}
 }
 
-func (s *liveCallStore) watch(ctx context.Context, session *liveSession) {
-	if session == nil || session.record == nil {
-		return
-	}
-	refresh := time.NewTicker(liveLeaseRefreshInterval)
-	defer refresh.Stop()
-	timer := time.NewTimer(time.Until(session.record.ExpiresAt))
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			s.finalize(session.record)
-			return
-		case <-refresh.C:
-			s.mu.Lock()
-			closed := session.record.Controller == liveControllerClosed
-			s.mu.Unlock()
-			if closed {
-				return
-			}
-			_ = s.persist(ctx, session.record)
-		}
-	}
-}
-
-func (s *liveCallStore) persist(ctx context.Context, record *liveCallRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.persistLocked(ctx, record)
-}
-
 func (s *liveCallStore) persistLocked(ctx context.Context, record *liveCallRecord) error {
 	if s == nil || s.handler == nil || s.handler.cache == nil || record == nil {
 		return nil
@@ -227,41 +145,6 @@ func (s *liveCallStore) load(ctx context.Context, callHash string) (*liveCallRec
 		return nil, false, err
 	}
 	return &record, true, nil
-}
-
-func (s *liveCallStore) acquireLeases(ctx context.Context, record *liveCallRecord) error {
-	if s == nil || s.handler == nil || s.handler.cache == nil || record == nil {
-		return nil
-	}
-	ttl := time.Until(record.ExpiresAt) + 5*time.Minute
-	if ttl < time.Minute {
-		ttl = time.Minute
-	}
-	if record.AccountID > 0 {
-		ok, err := s.handler.cache.AcquireLease(ctx, liveAccountLeaseNamespace, liveLeaseKey(record.AccountID, record.LeaseID), record.LeaseID, ttl)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("live account lease unavailable")
-		}
-	}
-	if record.APIKeyID > 0 {
-		ok, err := s.handler.cache.AcquireLease(ctx, liveKeyLeaseNamespace, liveLeaseKey(record.APIKeyID, record.LeaseID), record.LeaseID, ttl)
-		if err != nil {
-			if record.AccountID > 0 {
-				_ = s.handler.cache.ReleaseLease(ctx, liveAccountLeaseNamespace, liveLeaseKey(record.AccountID, record.LeaseID), record.LeaseID)
-			}
-			return err
-		}
-		if !ok {
-			if record.AccountID > 0 {
-				_ = s.handler.cache.ReleaseLease(ctx, liveAccountLeaseNamespace, liveLeaseKey(record.AccountID, record.LeaseID), record.LeaseID)
-			}
-			return fmt.Errorf("live API key lease unavailable")
-		}
-	}
-	return nil
 }
 
 func (s *liveCallStore) releaseLeases(ctx context.Context, record *liveCallRecord) {

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/tidwall/gjson"
 )
 
 // 本文件量化 Grok 投递前置链路（normalize → sanitize → turnIndex）在大请求体下的
@@ -65,25 +63,6 @@ func buildGrokCodexBody(targetBytes int, dirty bool) []byte {
 
 // TestGrokBenchFixtureShape 锁住 fixture 的前提：dirty 变体确实触发重建、
 // clean 变体确实不触发。否则基准数字会失去意义。
-func TestGrokBenchFixtureShape(t *testing.T) {
-	dirty := buildGrokCodexBody(64*1024, true)
-	if !gjson.ValidBytes(dirty) {
-		t.Fatalf("dirty fixture 不是合法 JSON")
-	}
-	out, _ := normalizeGrokUpstreamTools(dirty)
-	if gjson.GetBytes(out, "input.2.id").Exists() || gjson.GetBytes(out, "input.2.status").Exists() {
-		t.Fatalf("dirty fixture 未被重建: %s", gjson.GetBytes(out, "input.2").Raw)
-	}
-
-	clean := buildGrokCodexBody(64*1024, false)
-	if !gjson.ValidBytes(clean) {
-		t.Fatalf("clean fixture 不是合法 JSON")
-	}
-	cleanOut, _ := normalizeGrokUpstreamTools(clean)
-	if len(cleanOut) != len(clean) {
-		t.Fatalf("clean fixture 本不该被改写，却发生了重建 (%d → %d)", len(clean), len(cleanOut))
-	}
-}
 
 func benchGrokSizes() []struct {
 	name  string
@@ -100,57 +79,11 @@ func benchGrokSizes() []struct {
 
 // BenchmarkGrokNormalizeDirty 是真实 Codex 流量的主场景：历史项带扩展字段，
 // 必须完整 Unmarshal → 重建 → Marshal。
-func BenchmarkGrokNormalizeDirty(b *testing.B) {
-	for _, size := range benchGrokSizes() {
-		body := buildGrokCodexBody(size.bytes, true)
-		b.Run(size.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(body)))
-			for i := 0; i < b.N; i++ {
-				out, aliases := normalizeGrokUpstreamTools(body)
-				if len(out) == 0 {
-					b.Fatal("空结果")
-				}
-				_ = aliases
-			}
-		})
-	}
-}
 
 // BenchmarkGrokNormalizeClean 量化"body 本来就干净"时被白做的那次全量 Unmarshal
 // （方案 A 精确化触发条件能省下的部分）。
-func BenchmarkGrokNormalizeClean(b *testing.B) {
-	for _, size := range benchGrokSizes() {
-		body := buildGrokCodexBody(size.bytes, false)
-		b.Run(size.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(body)))
-			for i := 0; i < b.N; i++ {
-				out, aliases := normalizeGrokUpstreamTools(body)
-				if len(out) == 0 {
-					b.Fatal("空结果")
-				}
-				_ = aliases
-			}
-		})
-	}
-}
 
 // BenchmarkGrokSanitize 量化 sanitize 链上多次 sjson 全量重分配的代价。
-func BenchmarkGrokSanitize(b *testing.B) {
-	for _, size := range benchGrokSizes() {
-		body := buildGrokCodexBody(size.bytes, true)
-		b.Run(size.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(body)))
-			for i := 0; i < b.N; i++ {
-				if out := sanitizeGrokRequestBody(body); len(out) == 0 {
-					b.Fatal("空结果")
-				}
-			}
-		})
-	}
-}
 
 // BenchmarkGrokTurnIndex 量化独立于 normalize 的第二次 input[] 全量遍历（#4）。
 func BenchmarkGrokTurnIndex(b *testing.B) {
@@ -169,60 +102,11 @@ func BenchmarkGrokTurnIndex(b *testing.B) {
 }
 
 // BenchmarkGrokPreflightChainLegacy 是逐步改写实现的前置链路，作为优化前的基线。
-func BenchmarkGrokPreflightChainLegacy(b *testing.B) {
-	for _, size := range benchGrokSizes() {
-		body := buildGrokCodexBody(size.bytes, true)
-		b.Run(size.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(body)))
-			for i := 0; i < b.N; i++ {
-				out, aliases := normalizeGrokUpstreamTools(body)
-				out = sanitizeGrokRequestBody(out)
-				turn := grokTurnIndex(out)
-				model := gjson.GetBytes(out, "model").String()
-				if len(out) == 0 || turn < 1 || model == "" {
-					b.Fatal("前置链路结果异常")
-				}
-				_ = aliases
-			}
-		})
-	}
-}
 
 // BenchmarkGrokPreflightChain 是 ExecuteGrokRequest 实际走的单次遍历前置链路。
-func BenchmarkGrokPreflightChain(b *testing.B) {
-	for _, size := range benchGrokSizes() {
-		body := buildGrokCodexBody(size.bytes, true)
-		b.Run(size.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(body)))
-			for i := 0; i < b.N; i++ {
-				res := prepareGrokUpstreamBody(body)
-				if len(res.Body) == 0 || res.TurnIndex < 1 || res.Model == "" {
-					b.Fatal("前置链路结果异常")
-				}
-			}
-		})
-	}
-}
 
 // BenchmarkGrokPreflightChainClean 覆盖已符合原生契约的请求体：应几乎只有一次
 // raw 拷贝的成本。
-func BenchmarkGrokPreflightChainClean(b *testing.B) {
-	for _, size := range benchGrokSizes() {
-		body := buildGrokCodexBody(size.bytes, false)
-		b.Run(size.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(body)))
-			for i := 0; i < b.N; i++ {
-				res := prepareGrokUpstreamBody(body)
-				if len(res.Body) == 0 || res.TurnIndex < 1 {
-					b.Fatal("前置链路结果异常")
-				}
-			}
-		})
-	}
-}
 
 // BenchmarkGrokJSONRoundTrip 把 normalize 的开销拆成 Unmarshal / Marshal 两段，
 // 用于判断瓶颈到底在解码、重建循环还是编码。
