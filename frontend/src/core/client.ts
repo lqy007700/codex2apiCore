@@ -32,7 +32,9 @@ export function jsonObject(text: string): JsonRecord {
 }
 export function formatTime(value: unknown) {
   if (!value) return '—'
-  const date = new Date(String(value))
+  const raw = String(value).trim()
+  const numeric = /^\d+$/.test(raw) ? Number(raw) : null
+  const date = new Date(numeric === null ? raw : numeric < 1e12 ? numeric * 1000 : numeric)
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', {hour12: false})
 }
 export function writableSettings(settings: JsonRecord) {

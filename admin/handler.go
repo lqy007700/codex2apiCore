@@ -1084,6 +1084,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/:id/test", h.TestConnection)
 	api.GET("/accounts/:id/usage", h.GetAccountUsage)
 	api.POST("/accounts/:id/usage/refresh", h.RefreshAccountUsage)
+	api.POST("/accounts/:id/subscription/refresh", h.RefreshAccountSubscription)
 	api.POST("/accounts/batch-test", h.BatchTest)
 	api.POST("/accounts/batch-refresh", h.BatchRefreshAccounts)
 	api.POST("/accounts/batch-refresh-usage", h.BatchRefreshCodexUsage)
@@ -1389,6 +1390,7 @@ type accountResponse struct {
 	EffectiveWorkspaceID    string `json:"effective_workspace_id,omitempty"`
 	PlanType                string `json:"plan_type"`
 	SubscriptionExpiresAt   string `json:"subscription_expires_at,omitempty"`
+	AccessTokenExpiresAt    string `json:"access_token_expires_at,omitempty"`
 	// Subscription 服务端计算的订阅状态对象（业务状态 + 同步状态）；不跟踪订阅的
 	// 套餐（api/无到期时间的 free）为空。
 	Subscription          *auth.SubscriptionStatusView `json:"subscription,omitempty"`

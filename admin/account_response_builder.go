@@ -227,6 +227,7 @@ func (h *Handler) buildAccountResponse(
 		EffectiveWorkspaceID:         effectiveWorkspaceID,
 		PlanType:                     planType,
 		SubscriptionExpiresAt:        row.GetCredential("subscription_expires_at"),
+		AccessTokenExpiresAt:         row.GetCredential("expires_at"),
 		Subscription:                 subscriptionStatusViewForRow(row, planType),
 		CodexLastRefreshAt:           row.GetCredential("codex_last_refresh_at"),
 		CodexRefreshError:            row.GetCredential("codex_refresh_error"),

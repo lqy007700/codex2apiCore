@@ -28,6 +28,9 @@ func TestCoreServiceRoutesAndSettingsBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.UpdateCredentials(context.Background(), nativeID, map[string]interface{}{"expires_at": "2026-11-01T12:00:00Z", "subscription_expires_at": "2026-12-01T12:00:00Z", "codex_last_refresh_at": "2026-10-14T10:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
 	legacyID, err := db.InsertOpenAIResponsesAccount(context.Background(), "legacy", map[string]interface{}{"upstream_type": "openai_responses", "api_key": "test"}, "")
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +80,11 @@ func TestCoreServiceRoutesAndSettingsBoundary(t *testing.T) {
 			t.Fatalf("missing core route %s", path)
 		}
 	}
+	for _, path := range []string{"GET /api/admin/accounts/:id/reset-credits", "POST /api/admin/accounts/:id/reset-credits", "POST /api/admin/accounts/:id/subscription/refresh", "GET /api/admin/accounts/:id/usage"} {
+		if !paths[path] {
+			t.Fatalf("missing account operation %s", path)
+		}
+	}
 	call := func(method, path, body string, authorized bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -89,6 +97,22 @@ func TestCoreServiceRoutesAndSettingsBoundary(t *testing.T) {
 	}
 	if out := call("GET", "/api/admin/core-status", "", false); out.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status=%d", out.Code)
+	}
+	if out := call("GET", fmt.Sprintf("/api/admin/accounts/%d", nativeID), "", true); out.Code != http.StatusOK {
+		t.Fatalf("detail failed: %s", out.Body.String())
+	} else {
+		var account map[string]interface{}
+		if err := json.Unmarshal(out.Body.Bytes(), &account); err != nil {
+			t.Fatal(err)
+		}
+		if account["access_token_expires_at"] != "2026-11-01T12:00:00Z" || account["subscription_expires_at"] != "2026-12-01T12:00:00Z" || account["codex_last_refresh_at"] != "2026-10-14T10:00:00Z" {
+			t.Fatal("account expiry and refresh metadata are missing or confused")
+		}
+		for _, secret := range []string{"access_token", "refresh_token", "id_token"} {
+			if _, ok := account[secret]; ok {
+				t.Fatalf("detail exposes %s", secret)
+			}
+		}
 	}
 	for _, action := range []string{"batch-update", "batch-delete", "batch-reset-status", "batch-refresh"} {
 		body := fmt.Sprintf(`{"ids":[%d,%d],"enabled":false}`, nativeID, legacyID)

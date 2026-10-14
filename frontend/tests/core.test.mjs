@@ -32,3 +32,16 @@ test('SSE batch imports require a terminal event across arbitrary chunk boundari
  assert.deepEqual(await readEventResult(new Response(chunks)),{type:'complete',success:2,failed:0})
  await assert.rejects(readEventResult(new Response('data: {"type":"progress"}\n\n')),/提前结束/)
 })
+
+test('quota displays backend fields without inventing zero for unknown values',async()=>{
+ const {usagePercent,longWindowLabel,finiteNumber,accountState,stateInfo}=await import('../src/core/accountView.ts')
+ assert.equal(usagePercent({usage_percent_5h:12},'5h'),12)
+ assert.equal(usagePercent({usage_percent_5h:null},'5h'),null)
+ for(const value of ['',false,'invalid',Infinity])assert.equal(finiteNumber(value),null)
+ assert.equal(usagePercent({usage_percent_5h:0},'5h'),0)
+ assert.equal(longWindowLabel({usage_window_7d_kind:'monthly'}),'月周期')
+ assert.equal(accountState({enabled:false,status:'active'}).label,'已禁用')
+ assert.equal(accountState({enabled:true,locked:true,status:'active'}).label,'已锁定')
+ assert.equal(stateInfo('usage_exhausted').label,'额度耗尽')
+ assert.equal(stateInfo('unauthorized').label,'鉴权失败')
+})

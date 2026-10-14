@@ -23,6 +23,7 @@ var coreSettingKeys = map[string]bool{
 	"test_content":                             true,
 	"test_concurrency":                         true,
 	"usage_probe_max_age_minutes":              true,
+	"background_refresh_interval_minutes":      true,
 	"usage_probe_concurrency":                  true,
 	"usage_probe_responses_fallback_enabled":   true,
 	"recovery_probe_interval_minutes":          true,
