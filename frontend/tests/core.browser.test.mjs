@@ -14,7 +14,7 @@ try{
  const page=await browser.newPage({viewport:{width:1440,height:1000}}),failures=[],patches=[],settingsPatches=[],imports=[],consumes=[]
  page.on('pageerror',error=>failures.push(error.message))
  let account={id:1,name:'主账号',email:'operator@example.com',plan_type:'plus',status:'normal',enabled:true,locked:false,active_requests:1,dynamic_concurrency_limit:2,health_tier:'healthy',scheduler_score:105,usage_percent_5h:12,usage_percent_7d:38,usage_window_7d_kind:'monthly',usage_window_7d_seconds:2592000,reset_5h_at:'2026-10-15T08:00:00Z',reset_7d_at:'2026-11-01T00:00:00Z',rate_limit_reset_credits:2,subscription_expires_at:'2026-11-02T00:00:00Z',access_token_expires_at:'2026-10-16T10:00:00Z',codex_last_refresh_at:'2026-10-14T08:00:00Z',codex_usage_updated_at:'2026-10-14T08:05:00Z',subscription:{business_status:'active',sync_state:'confirmed',expires_at:'2026-11-02T00:00:00Z',last_checked_at:'2026-10-14T08:00:00Z'},auto_pause_5h_threshold:0.8,codex_fingerprint_mode:'single_machine_multi_window',proxy_url:'',custom_headers:{'User-Agent':'codex-tui/0.153.3'}}
- let settings={max_concurrency:2,auto_pause_5h_threshold:0.95,background_refresh_interval_minutes:2,scheduler_mode:'remaining_quota',scheduler_engine:'indexed',affinity_mode:'bounded',codex_fingerprint_default_mode:'off',codex_user_agent_config:'{"client_name":"codex-tui"}',codex_unified_client_identity_enabled:false,codex_force_websocket:true,usage_log_mode:'full',response_cache_config_generation:5,codex_client_versions:[]},expire=false,subscriptionFailed=true,cardsFailed=false
+ let settings={max_concurrency:2,auto_pause_5h_threshold:0.95,background_refresh_interval_minutes:2,scheduler_mode:'remaining_quota',scheduler_engine:'indexed',affinity_mode:'bounded',codex_fingerprint_default_mode:'off',codex_user_agent_config:'{"client_name":"codex-tui"}',codex_unified_client_identity_enabled:false,codex_force_websocket:true,usage_log_mode:'full',response_cache_config_generation:5,codex_client_versions:[]},expire=false,subscriptionFailed=true,cardsFailed=false,proxiesFailed=false
  await page.route('**/api/admin/**',async route=>{
   const req=route.request(),path=new URL(req.url()).pathname.replace('/api/admin',''),method=req.method()
   const body=req.postData()&&req.headers()['content-type']?.includes('application/json')?req.postDataJSON():{}
@@ -42,7 +42,10 @@ try{
   if(path==='/settings'&&method==='GET')return json(settings)
   if(path==='/settings'&&method==='PUT'){settingsPatches.push(body);settings={...settings,...body};return json(settings)}
   if(path==='/core-status'){if(expire)return route.fulfill({status:401,contentType:'application/json',body:'{"error":"管理密钥无效"}'});return json({available:1,total:1,active_requests:1,scheduler:{engine:'indexed',waiters:0,max_waiters:100,max_waiters_per_key:50}})}
-  if(path==='/proxies')return json({proxies:[{id:1,url:'http://proxy.example:8080',label:'测试代理',enabled:true,test_status:'untested',bound_count:0}]})
+  if(path==='/proxies'){
+   if(proxiesFailed)return route.fulfill({status:502,contentType:'application/json',body:JSON.stringify({error:'测试代理列表加载失败'})})
+   return json({proxies:[{id:1,url:'http://proxy.example:8080',label:'测试代理',enabled:true,test_status:'untested',bound_count:0},{id:2,url:'socks5://disabled.example:1080',label:'停用代理',enabled:false,test_status:'untested',bound_count:0}]})
+  }
   if(path==='/usage/logs')return json({logs:[]})
   if(path==='/keys')return json({keys:[]})
   failures.push(`unexpected ${method} ${path}`);return route.fulfill({status:404,body:'{}'})
@@ -80,13 +83,37 @@ try{
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'mobile account detail overflow')
  await page.setViewportSize({width:1440,height:1000})
  await detail.getByRole('tab',{name:'账号配置',exact:true}).click()
+ const proxySelect=page.getByLabel('独立代理 URL',{exact:true}),timezoneSelect=page.getByLabel('账号时区',{exact:true})
+ await proxySelect.selectOption('http://proxy.example:8080');await timezoneSelect.selectOption('Asia/Shanghai')
+ assert.equal(await proxySelect.getByRole('option',{name:/停用代理/}).isDisabled(),true)
  await page.getByLabel('设备与会话指纹收敛').selectOption('device')
  await page.getByLabel('账号并发覆盖（留空继承）').fill('3')
  assert.equal(await page.getByLabel('5h 暂停阈值（%）',{exact:true}).inputValue(),'80')
  await page.getByLabel('5h 暂停阈值（%）',{exact:true}).fill('90')
  await page.getByLabel('账号自定义请求头（JSON）').fill('{"User-Agent":"codex-tui/0.153.4"}')
  await page.getByRole('button',{name:'保存配置',exact:true}).click();await page.getByText('账号配置已保存').waitFor()
- assert.deepEqual(patches[0],{codex_fingerprint_mode:'device',base_concurrency_override:3,auto_pause_5h_threshold:0.9,custom_headers:{'User-Agent':'codex-tui/0.153.4'}})
+ assert.deepEqual(patches[0],{proxy_url:'http://proxy.example:8080',timezone:'Asia/Shanghai',codex_fingerprint_mode:'device',base_concurrency_override:3,auto_pause_5h_threshold:0.9,custom_headers:{'User-Agent':'codex-tui/0.153.4'}})
+ await proxySelect.selectOption('__custom__');await page.getByLabel('手动填写独立代理 URL',{exact:true}).fill('socks5://custom.example:1080')
+ await timezoneSelect.selectOption('__custom__');await page.getByLabel('手动填写账号时区',{exact:true}).fill('Etc/GMT-8')
+ await page.getByRole('button',{name:'保存配置',exact:true}).click();await page.getByText('账号配置已保存').waitFor()
+ assert.deepEqual(patches[1],{proxy_url:'socks5://custom.example:1080',timezone:'Etc/GMT-8'})
+ await page.getByRole('button',{name:'关闭',exact:true}).click();await page.getByRole('button',{name:'管理',exact:true}).click()
+ proxiesFailed=true;await page.getByRole('tab',{name:'账号配置',exact:true}).click()
+ await page.getByRole('alert').filter({hasText:'代理列表加载失败'}).waitFor()
+ assert.equal(await page.getByLabel('手动填写独立代理 URL',{exact:true}).inputValue(),'socks5://custom.example:1080')
+ assert.equal(await page.getByLabel('手动填写账号时区',{exact:true}).inputValue(),'Etc/GMT-8');assert.equal(patches.length,2)
+ proxiesFailed=false;await page.getByRole('button',{name:'重新加载代理',exact:true}).click()
+ await page.getByText('正在加载代理列表…',{exact:true}).waitFor({state:'hidden'})
+ await page.getByLabel('独立代理 URL',{exact:true}).selectOption('http://proxy.example:8080')
+ await page.getByLabel('账号时区',{exact:true}).selectOption('America/New_York')
+ await page.screenshot({path:'/tmp/codex2api-core-selectors-desktop.png',fullPage:true})
+ await page.setViewportSize({width:390,height:844});await page.screenshot({path:'/tmp/codex2api-core-selectors-mobile.png',fullPage:true})
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'mobile selectors overflow')
+ await page.setViewportSize({width:1440,height:1000})
+ await page.getByLabel('独立代理 URL',{exact:true}).selectOption('');await page.getByLabel('账号时区',{exact:true}).selectOption('')
+ await page.getByRole('button',{name:'保存配置',exact:true}).click();await page.getByText('账号配置已保存').waitFor()
+ assert.deepEqual(patches[2],{proxy_url:'',timezone:''})
+
  await page.getByRole('button',{name:'关闭',exact:true}).click()
  await page.getByRole('button',{name:'导入账号',exact:true}).click();await page.getByLabel('凭据',{exact:true}).fill('test-refresh-token')
  await page.getByRole('button',{name:'导入',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});assert.equal(imports[0].skip_refresh,true)
@@ -101,11 +128,11 @@ try{
  await page.getByRole('button',{name:'保存修改',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});assert.deepEqual(settingsPatches[1],{codex_user_agent_config:advanced.codex_user_agent_config})
  const threshold=page.getByLabel('5h 配额暂停阈值（%）',{exact:true});assert.equal(await threshold.inputValue(),'95');await threshold.fill('92')
  await page.getByRole('button',{name:/保存 1 项修改/}).click();await page.getByText('运行设置已保存').waitFor();assert.deepEqual(settingsPatches[2],{auto_pause_5h_threshold:0.92})
- for(const name of ['调度状态','代理出口','请求日志','渠道密钥']){await page.getByRole('link',{name,exact:true}).click();await page.getByRole('heading',{name,exact:true}).waitFor();if(name==='代理出口')await page.getByText('未测试',{exact:true}).waitFor()}
+ for(const name of ['调度状态','代理出口','请求日志','渠道密钥']){await page.getByRole('link',{name,exact:true}).click();await page.getByRole('heading',{name,exact:true}).waitFor();if(name==='代理出口')await page.getByText('未测试',{exact:true}).first().waitFor()}
  await page.getByRole('link',{name:'账号池',exact:true}).click();await page.getByText('operator@example.com').waitFor()
  await page.screenshot({path:'/tmp/codex2api-core-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844})
  await page.screenshot({path:'/tmp/codex2api-core-mobile.png',fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'mobile page overflow')
  expire=true;await page.getByRole('link',{name:'调度状态',exact:true}).click();await page.getByRole('button',{name:'登录',exact:true}).waitFor();assert.equal(await page.evaluate(()=>sessionStorage.getItem('codex-account-service:admin-key')),null)
  assert.deepEqual(failures,[])
- console.log('Browser checks passed: login, real quota fields, month window, subscription failure, reset card confirmation, card query failure, usage history, Chinese help, paged search, fingerprint patch, SSE import, partial settings, editor focus, navigation, mobile layout, expired authentication.')
+ console.log('Browser checks passed: login, proxy and timezone selection, custom values, load failure preservation, clear overrides, real quota fields, month window, subscription failure, reset card confirmation, card query failure, usage history, Chinese help, paged search, fingerprint patch, SSE import, partial settings, editor focus, navigation, mobile layout, expired authentication.')
 }finally{await browser?.close();server.kill('SIGTERM')}

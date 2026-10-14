@@ -5,6 +5,7 @@ import {adminKey, formatTime, jsonObject, request, secretKey, send, writableSett
 import {accountFields, settingsGroups, type Field} from './settings'
 import {accountState, planLabel, stateInfo} from './accountView'
 import {AccountResources, QuotaWindow} from './AccountResources'
+import {ProxySelector, TimezoneSelector} from './AccountSelectors'
 import type {Account, AccountPage, KeyRow, ProxyRow} from './types'
 
 type Task = () => Promise<unknown>
@@ -112,7 +113,7 @@ function ImportAccounts({onDone}:{onDone:()=>void}){
    if(Number(result.failed)>0)throw new Error(`部分导入失败，请刷新账号列表检查结果：${JSON.stringify(result)}`)
   }
   onDone()
- })}}><label className="field">凭据类型<select value={kind} onChange={event=>setKind(event.target.value)}><option value="refresh">Refresh Token（每行一个）</option><option value="access">Access Token（每行一个）</option><option value="file">Codex JSON 凭据文件</option></select></label>{kind==='file'?<label className="field">JSON 文件<input type="file" accept=".json,application/json" required onChange={event=>setFile(event.target.files?.[0]??null)}/></label>:<label className="field">凭据<textarea required rows={7} spellCheck={false} autoComplete="off" value={credential} onChange={event=>setCredential(event.target.value)} placeholder="只在导入时提交，日志不会记录 Token。"/></label>}<div className="form-grid"><label className="field">名称（可选）<input value={name} onChange={event=>setName(event.target.value)}/></label><label className="field">代理 URL（可选）<input value={proxy} onChange={event=>setProxy(event.target.value)}/></label></div><label className="check-field"><input type="checkbox" checked={skip} onChange={event=>setSkip(event.target.checked)}/>导入时跳过立即刷新，交给后台刷新任务</label><Notice notice={task.notice}/><button className="primary" disabled={task.busy}>{task.busy?'导入中…':'导入'}</button></form>
+ })}}><label className="field">凭据类型<select value={kind} onChange={event=>setKind(event.target.value)}><option value="refresh">Refresh Token（每行一个）</option><option value="access">Access Token（每行一个）</option><option value="file">Codex JSON 凭据文件</option></select></label>{kind==='file'?<label className="field">JSON 文件<input type="file" accept=".json,application/json" required onChange={event=>setFile(event.target.files?.[0]??null)}/></label>:<label className="field">凭据<textarea required rows={7} spellCheck={false} autoComplete="off" value={credential} onChange={event=>setCredential(event.target.value)} placeholder="只在导入时提交，日志不会记录 Token。"/></label>}<div className="form-grid"><label className="field">名称（可选）<input value={name} onChange={event=>setName(event.target.value)}/></label><ProxySelector label="代理 URL（可选）" value={proxy} onChange={setProxy}/></div><label className="check-field"><input type="checkbox" checked={skip} onChange={event=>setSkip(event.target.checked)}/>导入时跳过立即刷新，交给后台刷新任务</label><Notice notice={task.notice}/><button className="primary" disabled={task.busy}>{task.busy?'导入中…':'导入'}</button></form>
 }
 function AccountEditor({id,onChanged,onDeleted}:{id:number;onChanged:()=>void;onDeleted:()=>void}){
  const data=useData<Account>(`/accounts/${id}`),[patch,setPatch]=useState<JsonRecord>({}),[headers,setHeaders]=useState(''),[headersEdited,setHeadersEdited]=useState(false),[output,setOutput]=useState(''),[tab,setTab]=useState<'overview'|'config'>('overview');const task=useTask()
@@ -134,7 +135,13 @@ function AccountEditor({id,onChanged,onDeleted}:{id:number;onChanged:()=>void;on
    if(headersEdited){const custom=jsonObject(headers);if(Object.values(custom).some(value=>typeof value!=='string'))throw new Error('自定义请求头的值必须是字符串');body.custom_headers=custom}
    if(!Object.keys(body).length)throw new Error('没有待保存的修改')
    await send(`/accounts/${id}/scheduler`,'PATCH',body);setPatch({});setHeadersEdited(false);await reload()
-  },'账号配置已保存')}}><div className="form-grid">{accountFields.map(field=><FieldInput key={field.key} field={field} value={field.key in patch?patch[field.key]:account[field.key]} onChange={value=>setPatch(previous=>({...previous,[field.key]:value}))}/>)}</div>
+  },'账号配置已保存')}}><div className="form-grid">{accountFields.map(field=>{
+   const value=field.key in patch?patch[field.key]:account[field.key]
+   const change=(value:unknown)=>setPatch(previous=>({...previous,[field.key]:value}))
+   if(field.key==='proxy_url')return <ProxySelector key={field.key} value={String(value??'')} onChange={change}/>
+   if(field.key==='timezone')return <TimezoneSelector key={field.key} value={String(value??'')} onChange={change}/>
+   return <FieldInput key={field.key} field={field} value={value} onChange={change}/>
+  })}</div>
   <label className="field"><span><Fingerprint size={16}/>账号自定义请求头（JSON）</span><textarea rows={5} spellCheck={false} value={headersEdited?headers:JSON.stringify(account.custom_headers??{},null,2)} onChange={event=>{setHeadersEdited(true);setHeaders(event.target.value)}}/><small>按 JSON 对象填写，值必须是字符串。可覆盖 User-Agent、Originator、Version 等出站身份；清空为 {'{}'} 会移除账号覆盖。</small></label><button className="primary" disabled={task.busy}><Check size={16}/>保存配置</button></form></div>}
   {output&&<details open><summary>连接测试输出</summary><pre className="test-output">{output}</pre></details>}
   <details><summary>原始状态（排查用）</summary><pre>{JSON.stringify(account,null,2)}</pre></details>
