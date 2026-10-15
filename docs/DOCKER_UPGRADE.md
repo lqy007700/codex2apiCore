@@ -10,7 +10,7 @@
 
 ## 首次准备
 
-GHCR 首次发布的新镜像包默认是 private，即使代码仓库是 public。请在镜像包页面 **Package settings → Change visibility → Public** 设置一次，之后服务器可匿名拉取：
+当前镜像包已验证可匿名拉取，无需登录 GHCR。若将来重新创建镜像包，GHCR 首次发布默认是 private，即使代码仓库是 public；可在镜像包页面 **Package settings → Change visibility → Public** 设置一次：
 
 https://github.com/users/lqy007700/packages/container/codex2apicore
 

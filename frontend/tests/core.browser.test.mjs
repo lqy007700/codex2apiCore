@@ -3,7 +3,8 @@ import {spawn} from 'node:child_process'
 import {chromium} from 'playwright'
 import {setTimeout as delay} from 'node:timers/promises'
 const origin='http://127.0.0.1:4177'
-const server=spawn('npm',['run','dev','--','--host','127.0.0.1','--port','4177','--strictPort'],{stdio:'pipe'})
+// Own Vite directly so cleanup terminates the server, not just an npm wrapper.
+const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','4177','--strictPort'],{stdio:'pipe'})
 let output='',browser
 server.stdout.on('data',chunk=>output+=chunk);server.stderr.on('data',chunk=>output+=chunk)
 try{
