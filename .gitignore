@@ -60,3 +60,15 @@ diagrams/
 
 # local e2e test scaffolding (mock upstream + scripts, not for CI)
 /local-test/
+
+# Local image upgrade state and service locks
+.codex2api-upgrade/
+# Version only the deployment tools; keep other local scripts ignored.
+!/scripts/
+/scripts/*
+!/scripts/build-release.sh
+!/scripts/upgrade.sh
+!/scripts/upgrade-prod.sh
+!/scripts/tests/
+/scripts/tests/*
+!/scripts/tests/test_upgrade.py

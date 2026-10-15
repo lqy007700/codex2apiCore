@@ -23,6 +23,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  upgrade-tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check scoped Docker upgrades
+        run: |
+          bash -n scripts/upgrade.sh scripts/upgrade-prod.sh
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          touch .env
+          docker compose -f compose.core.example.yml config --quiet
+
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 8

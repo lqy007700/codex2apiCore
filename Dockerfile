@@ -25,7 +25,8 @@ ARG TARGETARCH
 ARG BUILD_VERSION=dev
 
 # 国内构建走 goproxy.cn，避免直连 proxy.golang.org 断流（unexpected EOF）
-ENV GOPROXY=https://goproxy.cn,direct
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
 
 WORKDIR /app
 COPY go.mod go.sum ./

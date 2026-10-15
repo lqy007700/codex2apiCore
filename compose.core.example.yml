@@ -1,0 +1,27 @@
+# Fresh installations only. Existing deployments: keep their original Compose
+# file, project name, ports and data mounts; use scripts/upgrade.sh on that file.
+name: codex2api-core
+services:
+  core:
+    image: ${CORE_IMAGE:-ghcr.io/lqy007700/codex2apicore:latest}
+    env_file:
+      - .env
+    environment:
+      CODEX_PORT: "8080"
+      CODEX_BIND: 0.0.0.0
+      DATABASE_DRIVER: sqlite
+      DATABASE_PATH: /data/codex2api.db
+      CACHE_DRIVER: memory
+    ports:
+      - "${CORE_BIND_HOST:-127.0.0.1}:${CORE_HOST_PORT:-18083}:8080"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: [CMD-SHELL, 'wget -T 5 -q -O - http://127.0.0.1:8080/health >/dev/null || exit 1']
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 30s
+    stop_grace_period: 60s
+    restart: unless-stopped
