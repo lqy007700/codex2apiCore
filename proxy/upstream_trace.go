@@ -3,8 +3,10 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
@@ -14,9 +16,10 @@ import (
 
 type upstreamTraceContextKey struct{}
 type upstreamTraceAttempt struct {
-	accountID int64
-	requestID string
-	proxy     auth.ProxyAuditLabel
+	accountID    int64
+	firstContent bool
+	requestID    string
+	proxy        auth.ProxyAuditLabel
 	// upstreamTurnState 是上游响应回带的 X-Codex-Turn-State，空串表示没有。
 	upstreamTurnState string
 }
@@ -59,10 +62,13 @@ func (s upstreamTraceSnapshot) apply(input *database.UsageLogInput) {
 }
 
 type upstreamTraceAudit struct {
-	mu        sync.Mutex
-	requestID string
-	store     *auth.Store
-	current   *upstreamTraceAttempt
+	mu              sync.Mutex
+	requestID       string
+	store           *auth.Store
+	current         *upstreamTraceAttempt
+	startedAt       time.Time
+	events          []executionEvent
+	eventsTruncated bool
 }
 
 func upstreamTraceFromContext(ctx context.Context) *upstreamTraceAudit {
@@ -77,8 +83,9 @@ func attachUpstreamTrace(c *gin.Context, store *auth.Store) {
 	if c == nil || c.Request == nil {
 		return
 	}
-	a := &upstreamTraceAudit{requestID: NewUpstreamSessionUUID(), store: store}
+	a := &upstreamTraceAudit{requestID: NewUpstreamSessionUUID(), store: store, startedAt: time.Now()}
 	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), upstreamTraceContextKey{}, a))
+	RecordExecutionEvent(c.Request.Context(), "request_received", 0, nil)
 	c.Header("X-Codex2API-Request-ID", a.requestID)
 }
 
@@ -90,7 +97,11 @@ func resetUpstreamRequestTrace(c *gin.Context) {
 		a.mu.Lock()
 		a.requestID = NewUpstreamSessionUUID()
 		a.current = nil
+		a.startedAt = time.Now()
+		a.events = nil
+		a.eventsTruncated = false
 		a.mu.Unlock()
+		RecordExecutionEvent(c.Request.Context(), "request_received", 0, nil)
 	}
 }
 
@@ -107,6 +118,8 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 	if a == nil || account == nil {
 		return func(*http.Response) {}
 	}
+	RecordExecutionEvent(ctx, "account_selected", account.ID(), nil)
+	RecordExecutionEvent(ctx, "upstream_started", account.ID(), nil)
 	label := a.store.ProxyAuditForURL(proxyURL)
 	if ws && proxyURL == "" {
 		label = auth.ProxyAuditLabel{Name: "unknown"}
@@ -163,6 +176,37 @@ func noteUpstreamTurnState(ctx context.Context, state string) {
 
 func doTracedUpstreamRequest(client *http.Client, req *http.Request, account *auth.Account, proxyURL string) (*http.Response, error) {
 	record := beginUpstreamTrace(req.Context(), account, proxyURL, false)
+	ctx := req.Context()
+	var connectionStart time.Time
+	var connectionMu sync.Mutex
+	if account != nil && upstreamTraceFromContext(ctx) != nil {
+		trace := &httptrace.ClientTrace{
+			GetConn: func(string) {
+				connectionMu.Lock()
+				connectionStart = time.Now()
+				connectionMu.Unlock()
+				RecordExecutionEvent(ctx, "http_connection_started", account.ID(), nil)
+			},
+			GotConn: func(httptrace.GotConnInfo) {
+				connectionMu.Lock()
+				started := connectionStart
+				connectionMu.Unlock()
+				if !started.IsZero() {
+					duration := time.Since(started)
+					RecordExecutionEvent(ctx, "http_connection_finished", account.ID(), &duration)
+				} else {
+					RecordExecutionEvent(ctx, "http_connection_finished", account.ID(), nil)
+				}
+			},
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				if info.Err == nil {
+					RecordExecutionEvent(ctx, "request_sent", account.ID(), nil)
+				}
+			},
+			GotFirstResponseByte: func() { RecordExecutionEvent(ctx, "response_headers", account.ID(), nil) },
+		}
+		req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
+	}
 	resp, err := client.Do(req)
 	record(resp)
 	return resp, err

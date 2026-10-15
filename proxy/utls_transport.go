@@ -382,7 +382,11 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	// 获取主机名（不含端口）用于 TLS ServerName
 	hostname := req.URL.Hostname()
 
+	RecordExecutionEvent(req.Context(), "utls_connection_started", 0, nil)
+	connectionStart := time.Now()
 	entry, err := t.getOrCreateConnection(hostname, addr)
+	connectionDuration := time.Since(connectionStart)
+	RecordExecutionEvent(req.Context(), "utls_connection_finished", 0, &connectionDuration)
 	if err != nil {
 		return nil, err
 	}

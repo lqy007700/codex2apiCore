@@ -58,3 +58,31 @@ export function subscriptionLabel(value: unknown) {
 export function syncLabel(value: unknown) {
  return ({confirmed:'已确认',pending:'待确认',failed:'查询失败',unsupported:'上游不支持查询',unknown:'未查询'} as Record<string,string>)[String(value)]??'未查询'
 }
+
+export type AvailabilityItem={label:string;reason:string;action:string;until?:string;scope:'account'|'model'|'capacity'|'unknown';tone:'bad'|'neutral'|'good'}
+function cooldownExplanation(value:unknown) {
+ const raw=String(value??'')
+ const reasons:Record<string,string>={timeout:'请求超时后暂时冷却',first_token_timeout:'首字等待超时后暂时冷却',server_error:'上游服务错误后暂时冷却',capacity:'上游容量不足',overload:'上游过载',ws_busy_acquire:'上游连接繁忙',model_not_supported:'该账号暂不支持此模型',rate_limit:'上游限流',transient_rate_limit:'上游短期限流'}
+ if(reasons[raw])return `${reasons[raw]}（${raw}）`
+ if(states[raw])return `${states[raw].help}（${raw}）`
+ return raw?`服务记录的原因：${raw}`:'服务暂未返回具体原因。'
+}
+export function accountAvailability(account:Account,now=Date.now()):AvailabilityItem[] {
+ const result:AvailabilityItem[]=[]
+ const add=(item:AvailabilityItem)=>result.push(item)
+ if(account.enabled===false)add({label:'管理员禁用',reason:'该账号未开启调度。',action:'需要管理员启用；额度重置不会自动解除禁用。',scope:'account',tone:'neutral'})
+ if(account.locked)add({label:'管理员锁定',reason:'该账号被锁定。',action:'确认用途后由管理员解锁。',scope:'account',tone:'neutral'})
+ const until=typeof account.cooldown_until==='string'&&Date.parse(account.cooldown_until)>now?account.cooldown_until:undefined
+ if(until)add({label:'账号冷却中',reason:cooldownExplanation(account.cooldown_reason),until,action:'到期后重新检查；冷却到期不保证其他限制已解除。',scope:'account',tone:'neutral'})
+ const status=String(account.status??'unknown')
+ if(!['active','normal','ok','available',''].includes(status)){
+  const info=stateInfo(status)
+  const reset=status.includes('5h')?account.reset_5h_at:status.includes('7d')?account.reset_7d_at:undefined
+  add({label:info.label,reason:info.help,until:reset&&Date.parse(reset)>now?reset:undefined,action:status==='quota_paused'?'检查暂停阈值和额度快照；阈值暂停不等于额度耗尽。':/unauthorized|expired|refreshing/.test(status)?'检查凭据刷新结果；仅有 Access Token 时可能需要重新导入。':/rate_limited|usage|quota/.test(status)?'刷新额度，查看对应窗口的重置时间。':'查看最近错误和账号配置。',scope:status==='unknown'?'unknown':'account',tone:info.tone})
+ }
+ const active=finiteNumber(account.active_requests),limit=finiteNumber(account.dynamic_concurrency_limit)
+ if(active!==null&&limit!==null&&limit>0&&active>=limit)add({label:'并发已满',reason:`当前活跃 ${active} / 上限 ${limit}。`,action:'等待正在执行的请求释放；不要直接认定账号故障。',scope:'capacity',tone:'neutral'})
+ for(const cooldown of account.model_cooldowns??[]){if(Date.parse(cooldown.reset_at)>now)add({label:`模型 ${cooldown.model} 冷却`,reason:cooldownExplanation(cooldown.reason),until:cooldown.reset_at,action:'等待模型冷却结束或选择其他可用模型；这不代表整个账号不可用。',scope:'model',tone:'neutral'})}
+ if(!result.length)add({label:'未发现账号级阻塞',reason:'当前快照未发现禁用、锁定、账号冷却或并发占满。',action:'实际选号还受模型支持、渠道权限、会话绑定和实时调度限制。',scope:'unknown',tone:'good'})
+ return result
+}

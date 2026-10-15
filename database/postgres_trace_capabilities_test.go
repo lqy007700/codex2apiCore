@@ -28,7 +28,7 @@ func TestPostgresTraceAndCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.InsertUsageLog(ctx, &UsageLogInput{AccountID: id, Endpoint: "/v1/responses", Model: "gpt-5.6-sol", StatusCode: 200, RequestID: "pg-request", UpstreamRequestID: "pg-upstream", UpstreamProxyID: 9, UpstreamProxyName: "snapshot"}); err != nil {
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{AccountID: id, Endpoint: "/v1/responses", Model: "gpt-5.6-sol", StatusCode: 200, ExecutionTrace: `{"elapsed_ms":123}`, RequestID: "pg-request", UpstreamRequestID: "pg-upstream", UpstreamProxyID: 9, UpstreamProxyName: "snapshot"}); err != nil {
 		t.Fatal(err)
 	}
 	db.FlushUsageLogs()
@@ -42,6 +42,9 @@ func TestPostgresTraceAndCapabilities(t *testing.T) {
 	}
 	if chain, err := db.GetUsageRequestChain(ctx, logs[0].ID); err != nil || chain.RequestID != "pg-request" || len(chain.Records) != 1 {
 		t.Fatalf("PostgreSQL request chain: %+v, %v", chain, err)
+	}
+	if merged, err := db.ListMergedUsageLogs(ctx, f); err != nil || len(merged.Logs) != 1 || merged.Logs[0].ElapsedMs == nil || *merged.Logs[0].ElapsedMs != 123 {
+		t.Fatalf("PostgreSQL merged requests: %+v %v", merged, err)
 	}
 	if _, err := db.ListUsageLogsByTimeRangePaged(ctx, f); err != nil {
 		t.Fatal(err)

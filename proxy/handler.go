@@ -1579,6 +1579,7 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 	populateClientIPFromRequest(c, input)
 	populateUserAgentMetaFromRequest(c, input)
 	populateWsAcquireFromRequest(c, input)
+	populateExecutionEvents(c, input)
 	populateUpstreamTrace(c, input)
 	populateCompactUsageMetaFromRequest(c, input)
 	populateUltraUsageMetaFromRequest(c, input)
@@ -3549,6 +3550,7 @@ func (h *Handler) waitBeforeRetryWithFirstTokenTimeout(ctx context.Context, firs
 }
 
 func (h *Handler) waitBeforeRetryWithBudgetMode(ctx context.Context, retryOrdinal, retryLimit int, useRequestKeepalive bool, responses ...*http.Response) bool {
+	defer executionSpan(ctx, "retry_wait")()
 	if ctx != nil && ctx.Err() != nil {
 		return false
 	}
@@ -4580,6 +4582,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						h.recordCompactionProvenanceFromPayload(context.Background(), account, data)
 					}
 					parsed := gjson.ParseBytes(data)
+					recordFirstExecutionContent(c.Request.Context(), account.ID(), parsed)
 					eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 					ttftGuard.MarkProgress(eventType)
 					isFirstToken := isLooseFirstTokenResult(parsed)
@@ -5254,6 +5257,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					clientGone = true
 				}
 				parsed := gjson.ParseBytes(data)
+				recordFirstExecutionContent(c.Request.Context(), account.ID(), parsed)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 
 				// TTFT: 记录第一个实际内容事件的时间
@@ -5504,6 +5508,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					h.recordCompactionProvenanceFromPayload(context.Background(), account, data)
 				}
 				parsed := gjson.ParseBytes(data)
+				recordFirstExecutionContent(c.Request.Context(), account.ID(), parsed)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 				if eventType == "error" {
 					terminalFailurePayload = terminalUpstreamErrorPayload(data)
@@ -7340,6 +7345,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			var pendingFirstTokenChunks bytes.Buffer
 			readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
 				parsed := gjson.ParseBytes(data)
+				recordFirstExecutionContent(c.Request.Context(), account.ID(), parsed)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 				if eventType == "response.failed" {
 					statusCode := classifyResponseFailedOutcome(data).logStatusCode
@@ -7508,6 +7514,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
 				outputCollector.Add(data)
 				parsed := gjson.ParseBytes(data)
+				recordFirstExecutionContent(c.Request.Context(), account.ID(), parsed)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 				ttftGuard.MarkProgress(eventType)
 				if !ttftRecorded && isLooseFirstTokenResult(parsed) {

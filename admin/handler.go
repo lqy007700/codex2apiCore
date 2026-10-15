@@ -1093,6 +1093,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/batch-delete", h.BatchDeleteAccounts)
 	api.GET("/accounts/export", h.ExportAccounts)
 	api.GET("/usage/logs", h.GetUsageLogs)
+	api.GET("/usage/requests", h.GetMergedUsageLogs)
 	api.GET("/usage/logs/:id/chain", h.GetUsageRequestChain)
 	api.DELETE("/usage/logs", h.ClearUsageLogs)
 	api.GET("/keys", h.ListAPIKeys)

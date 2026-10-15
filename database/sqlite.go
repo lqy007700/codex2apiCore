@@ -594,6 +594,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "turn_state_overridden", "INTEGER DEFAULT 0"},
 		{"usage_logs", "turn_state_rewrite_note", "TEXT DEFAULT ''"},
 		{"usage_logs", "internal_reason", "TEXT DEFAULT ''"},
+		{"usage_logs", "execution_trace", "TEXT DEFAULT ''"},
 		{"usage_logs", "parent_request_id", "TEXT DEFAULT ''"},
 		{"usage_logs", "request_id", "TEXT DEFAULT ''"},
 		{"usage_logs", "upstream_request_id", "TEXT DEFAULT ''"},

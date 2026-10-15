@@ -1,5 +1,6 @@
 import type {JsonRecord} from './client'
 export interface Account extends JsonRecord {
+ model_cooldowns?:{model:string;reason:string;reset_at:string;remaining_seconds?:number}[]
  id: number; name: string; email: string; plan_type: string; status: string; enabled: boolean; locked: boolean
  active_requests?: number; dynamic_concurrency_limit?: number; health_tier?: string; scheduler_score?: number
  codex_5h_used_percent?: number | string; codex_7d_used_percent?: number | string; proxy_url?: string; error_message?: string

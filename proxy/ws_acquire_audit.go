@@ -51,6 +51,7 @@ func resetWsAcquireAudit(ctx context.Context) {
 // AddWsAcquireDuration 累加一次 WS 连接获取耗时（wsrelay 调用；一个 attempt 内
 // 发送失败重建连接会多次获取，累加取整体）。
 func AddWsAcquireDuration(ctx context.Context, d time.Duration) {
+	RecordExecutionEvent(ctx, "ws_connection_finished", 0, &d)
 	if d <= 0 {
 		return
 	}

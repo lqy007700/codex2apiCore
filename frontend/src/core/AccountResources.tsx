@@ -1,3 +1,4 @@
+import {AccountAvailability} from './AccountAvailability'
 import {useState} from 'react'
 import {formatTime, request, send, type JsonRecord} from './client'
 import {accountState, finiteNumber, longWindowLabel, planLabel, stateInfo, subscriptionLabel, syncLabel, usagePercent} from './accountView'
@@ -35,6 +36,7 @@ export function AccountResources({account,busy,run,onChanged}:{account:Account;b
   setSubscriptionNotice(result.outcome==='unsupported'?'上游不支持查询此套餐的订阅到期时间。':result.outcome==='no_subscription'?'上游未返回订阅记录；不能据此假定永久有效。':'订阅信息已查询。')
  },'订阅查询已结束')
  return <>
+ <AccountAvailability account={account}/>
   <section className="account-section"><h3>账号状态与原因</h3><div className="account-summary"><span className={`badge ${state.tone}`} title={state.help}>{state.label}</span><strong>{planLabel(account.plan_type)}</strong>{account.using_credits&&<span className="badge neutral">正在使用积分</span>}</div><p className="section-help">{state.help}</p>{account.error_message&&<div role="alert" className="notice error">上游错误：{account.error_message}</div>}<dl className="facts"><div><dt>健康档位</dt><dd title={stateInfo(account.health_tier).help}>{stateInfo(account.health_tier).label}</dd></div><div><dt>冷却原因</dt><dd>{account.cooldown_reason?stateInfo(account.cooldown_reason).label:'无已知冷却'}</dd></div><div><dt>冷却结束</dt><dd>{formatTime(account.cooldown_until)}</dd></div><div><dt>当前并发 / 实际上限</dt><dd>{account.active_requests??0} / {account.dynamic_concurrency_limit??'未获取'}</dd></div></dl><p className="section-help">健康档位：{stateInfo(account.health_tier).help}</p><p className="section-help">“重置状态”只清理本地错误与冷却记录，不会刷新 Token、恢复上游额度或消耗重置卡。</p>
   </section>
   <section className="account-section"><div className="section-heading"><h3>上游额度</h3><button disabled={busy} onClick={()=>void run(async()=>{await send(`/accounts/${account.id}/usage/refresh`);await onChanged()},'额度已刷新')}>刷新额度</button></div><p className="section-help">百分比表示已用额度。额度自然重置、订阅到期和 Token 到期是不同时间；显示时间使用浏览器所在时区。</p><div className="quota-grid"><QuotaWindow account={account} window="5h"/><QuotaWindow account={account} window="7d"/>{account.usage_percent_spark!=null&&<QuotaWindow account={account} window="spark"/>}</div><dl className="facts"><div><dt>额度快照刷新时间</dt><dd>{formatTime(account.codex_usage_updated_at)}</dd></div><div><dt>5h 快照刷新时间</dt><dd>{formatTime(account.codex_5h_usage_updated_at)}</dd></div><div><dt>已知重置卡张数</dt><dd>{account.rate_limit_reset_credits??'未获取'}</dd></div><div><dt>已知积分余额</dt><dd>{account.credits_valid?(account.credits_balance??'未返回余额'):'未获取'}</dd></div></dl>

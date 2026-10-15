@@ -1397,6 +1397,7 @@ func (h *Handler) Messages(c *gin.Context) {
 					return false
 				}
 				parsed := gjson.ParseBytes(data)
+				recordFirstExecutionContent(c.Request.Context(), account.ID(), parsed)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 
 				// TTFT 跟踪
@@ -1556,6 +1557,7 @@ func (h *Handler) Messages(c *gin.Context) {
 
 			readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
 				parsed := gjson.ParseBytes(data)
+				recordFirstExecutionContent(c.Request.Context(), account.ID(), parsed)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 				if eventType == "error" {
 					terminalFailurePayload = terminalUpstreamErrorPayload(data)

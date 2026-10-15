@@ -245,6 +245,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		return nil, err
 	}
 	sendErr := e.sendRequest(wc, wsBody, pr.RequestID)
+	if sendErr == nil {
+		proxy.RecordExecutionEvent(ctx, "request_sent", account.ID(), nil)
+	}
 	if sendErr != nil && gjson.GetBytes(wsBody, "previous_response_id").String() != "" {
 		wc.session.RemovePendingRequest(pr.RequestID)
 		e.manager.DiscardConnection(wc)
@@ -268,6 +271,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 			proxy.RecordUpstreamUserAgent(ctx, wc.upstreamUserAgent)
 		}
 		sendErr = e.sendRequest(wc, wsBody, pr.RequestID)
+		if sendErr == nil {
+			proxy.RecordExecutionEvent(ctx, "request_sent", account.ID(), nil)
+		}
 	}
 	if sendErr != nil {
 		wc.session.RemovePendingRequest(pr.RequestID)

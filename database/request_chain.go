@@ -8,6 +8,7 @@ import (
 // UsageChainRecord is a bounded diagnostic projection. Account credentials and
 // billing fields are deliberately not loaded when following a request chain.
 type UsageChainRecord struct {
+	ExecutionTrace    string    `json:"execution_trace,omitempty"`
 	ID                int64     `json:"id"`
 	RequestID         string    `json:"request_id"`
 	ParentRequestID   string    `json:"parent_request_id"`
@@ -67,7 +68,7 @@ func (db *DB) GetUsageRequestChain(ctx context.Context, logID int64) (*UsageRequ
 	rows, err := db.conn.QueryContext(ctx, `SELECT u.id, COALESCE(u.request_id,''), COALESCE(u.parent_request_id,''), COALESCE(u.upstream_request_id,''), u.account_id, COALESCE(a.name,''),
  COALESCE(u.attempt_index,0), COALESCE(u.is_retry_attempt,false), u.status_code, u.model, COALESCE(u.effective_model,''), u.endpoint, COALESCE(u.upstream_endpoint,''),
  COALESCE(u.duration_ms,0), COALESCE(u.first_token_ms,0), COALESCE(u.input_tokens,0), COALESCE(u.output_tokens,0), COALESCE(u.cached_tokens,0), COALESCE(u.stream,false), COALESCE(u.via_websocket,false),
- COALESCE(u.upstream_proxy_name,''), COALESCE(u.upstream_error_kind,''), COALESCE(u.error_message,''), COALESCE(u.internal_reason,''), u.created_at
+ COALESCE(u.upstream_proxy_name,''), COALESCE(u.upstream_error_kind,''), COALESCE(u.error_message,''), COALESCE(u.internal_reason,''), u.created_at, COALESCE(u.execution_trace,'')
  FROM usage_logs u LEFT JOIN accounts a ON a.id=u.account_id WHERE `+where+` ORDER BY u.created_at ASC, u.id ASC LIMIT 500`, arg)
 	if err != nil {
 		return nil, err
@@ -76,7 +77,7 @@ func (db *DB) GetUsageRequestChain(ctx context.Context, logID int64) (*UsageRequ
 	for rows.Next() {
 		record := &UsageChainRecord{}
 		var createdAt interface{}
-		if err := rows.Scan(&record.ID, &record.RequestID, &record.ParentRequestID, &record.UpstreamRequestID, &record.AccountID, &record.AccountName, &record.AttemptIndex, &record.IsRetryAttempt, &record.StatusCode, &record.Model, &record.EffectiveModel, &record.Endpoint, &record.UpstreamEndpoint, &record.DurationMs, &record.FirstTokenMs, &record.InputTokens, &record.OutputTokens, &record.CachedTokens, &record.Stream, &record.ViaWebsocket, &record.UpstreamProxyName, &record.UpstreamErrorKind, &record.ErrorMessage, &record.InternalReason, &createdAt); err != nil {
+		if err := rows.Scan(&record.ID, &record.RequestID, &record.ParentRequestID, &record.UpstreamRequestID, &record.AccountID, &record.AccountName, &record.AttemptIndex, &record.IsRetryAttempt, &record.StatusCode, &record.Model, &record.EffectiveModel, &record.Endpoint, &record.UpstreamEndpoint, &record.DurationMs, &record.FirstTokenMs, &record.InputTokens, &record.OutputTokens, &record.CachedTokens, &record.Stream, &record.ViaWebsocket, &record.UpstreamProxyName, &record.UpstreamErrorKind, &record.ErrorMessage, &record.InternalReason, &createdAt, &record.ExecutionTrace); err != nil {
 			return nil, err
 		}
 		record.CreatedAt, err = parseDBTimeValue(createdAt)

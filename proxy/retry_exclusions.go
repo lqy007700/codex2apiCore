@@ -461,6 +461,7 @@ func (h *Handler) waitForRetryAccountAvailable(ctx context.Context, affinityKey 
 }
 
 func (h *Handler) waitForRetryAccountAvailableWithGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, preserveBinding bool, policy auth.DispatchPolicy) (*auth.Account, string, auth.SessionAffinityGuard, error) {
+	defer executionSpan(ctx, "queue")()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -528,6 +529,7 @@ func selectionFilterWithContext(ctx context.Context, filter auth.AccountFilter) 
 }
 
 func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclusions *retryAccountExclusions, filter auth.AccountFilter, preserveBinding bool, policy auth.DispatchPolicy) (*auth.Account, string, auth.SessionAffinityGuard, error) {
+	defer executionSpan(ctx, "selection")()
 	if ctx == nil {
 		ctx = context.Background()
 	}

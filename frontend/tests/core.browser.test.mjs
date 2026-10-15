@@ -13,7 +13,7 @@ try{
  browser=await chromium.launch({channel:'chrome',headless:true})
  const page=await browser.newPage({viewport:{width:1440,height:1000}}),failures=[],patches=[],settingsPatches=[],imports=[],consumes=[]
  page.on('pageerror',error=>failures.push(error.message))
- let account={id:1,name:'主账号',email:'operator@example.com',plan_type:'plus',status:'normal',enabled:true,locked:false,active_requests:1,dynamic_concurrency_limit:2,health_tier:'healthy',scheduler_score:105,usage_percent_5h:12,usage_percent_7d:38,usage_window_7d_kind:'monthly',usage_window_7d_seconds:2592000,reset_5h_at:'2026-10-15T08:00:00Z',reset_7d_at:'2026-11-01T00:00:00Z',rate_limit_reset_credits:2,subscription_expires_at:'2026-11-02T00:00:00Z',access_token_expires_at:'2026-10-16T10:00:00Z',codex_last_refresh_at:'2026-10-14T08:00:00Z',codex_usage_updated_at:'2026-10-14T08:05:00Z',subscription:{business_status:'active',sync_state:'confirmed',expires_at:'2026-11-02T00:00:00Z',last_checked_at:'2026-10-14T08:00:00Z'},auto_pause_5h_threshold:0.8,codex_fingerprint_mode:'single_machine_multi_window',proxy_url:'',custom_headers:{'User-Agent':'codex-tui/0.153.3'}}
+ let account={id:1,name:'主账号',email:'operator@example.com',plan_type:'plus',status:'normal',enabled:true,locked:false,active_requests:1,dynamic_concurrency_limit:2,health_tier:'healthy',scheduler_score:105,usage_percent_5h:12,usage_percent_7d:38,usage_window_7d_kind:'monthly',usage_window_7d_seconds:2592000,reset_5h_at:'2026-10-15T08:00:00Z',reset_7d_at:'2026-11-01T00:00:00Z',rate_limit_reset_credits:2,subscription_expires_at:'2026-11-02T00:00:00Z',access_token_expires_at:'2026-10-16T10:00:00Z',codex_last_refresh_at:'2026-10-14T08:00:00Z',codex_usage_updated_at:'2026-10-14T08:05:00Z',subscription:{business_status:'active',sync_state:'confirmed',expires_at:'2026-11-02T00:00:00Z',last_checked_at:'2026-10-14T08:00:00Z'},auto_pause_5h_threshold:0.8,model_cooldowns:[{model:'limited-model',reason:'rate_limited',reset_at:'2099-10-15T08:00:00Z'}],codex_fingerprint_mode:'single_machine_multi_window',proxy_url:'',custom_headers:{'User-Agent':'codex-tui/0.153.3'}}
  let settings={max_concurrency:2,auto_pause_5h_threshold:0.95,background_refresh_interval_minutes:2,scheduler_mode:'remaining_quota',scheduler_engine:'indexed',affinity_mode:'bounded',codex_fingerprint_default_mode:'off',codex_user_agent_config:'{"client_name":"codex-tui"}',codex_unified_client_identity_enabled:false,codex_force_websocket:true,usage_log_mode:'full',response_cache_config_generation:5,codex_client_versions:[]},expire=false,subscriptionFailed=true,cardsFailed=false,proxiesFailed=false
  await page.route('**/api/admin/**',async route=>{
   const req=route.request(),path=new URL(req.url()).pathname.replace('/api/admin',''),method=req.method()
@@ -46,7 +46,7 @@ try{
    if(proxiesFailed)return route.fulfill({status:502,contentType:'application/json',body:JSON.stringify({error:'测试代理列表加载失败'})})
    return json({proxies:[{id:1,url:'http://proxy.example:8080',label:'测试代理',enabled:true,test_status:'untested',bound_count:0},{id:2,url:'socks5://disabled.example:1080',label:'停用代理',enabled:false,test_status:'untested',bound_count:0}]})
   }
-  if(path==='/usage/logs')return json({logs:[],total:0})
+  if(path==='/usage/logs'||path==='/usage/requests')return json({logs:[],total:0})
   if(path==='/keys')return json({keys:[]})
   failures.push(`unexpected ${method} ${path}`);return route.fulfill({status:404,body:'{}'})
  })
@@ -59,6 +59,8 @@ try{
  await page.getByRole('button',{name:'管理',exact:true}).click()
  const detail=page.getByRole('dialog')
  await detail.getByRole('heading',{name:'上游额度',exact:true}).waitFor()
+ await detail.getByRole('heading',{name:'当前可用性与恢复条件',exact:true}).waitFor()
+ await detail.getByText('模型 limited-model 冷却',{exact:true}).waitFor();await detail.getByText('仅影响此模型',{exact:true}).waitFor()
  assert.equal(await detail.getByRole('progressbar',{name:'5 小时额度已用比例'}).getAttribute('value'),'12')
  await detail.getByText('月周期',{exact:true}).waitFor();await detail.getByText('Access Token 到期',{exact:true}).waitFor()
  await detail.getByRole('button',{name:'刷新额度',exact:true}).click()

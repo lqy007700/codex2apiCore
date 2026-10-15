@@ -78,3 +78,26 @@ test('request chain counts actual recorded attempts, not planned retries or inte
  assert.equal(summarizeChain([initial,sameAccount,duplicate,switched]).ambiguous,true)
  assert.equal(summarizeChain([initial,sameAccount,duplicate,switched]).switches,0)
 })
+
+test('error advice distinguishes known status from uncertain upstream causes',async()=>{
+ const {errorGuide}=await import('../src/core/errorGuide.ts')
+ assert.equal(errorGuide({id:1,status_code:429}).label,'上游限流')
+ assert.equal(errorGuide({id:1,status_code:598,upstream_error_kind:'rate_limit_exceeded'}).label,'上游限流')
+ assert.equal(errorGuide({id:1,status_code:598,upstream_error_kind:'first_token_timeout'}).label,'首字等待超时')
+ assert.equal(errorGuide({id:1,status_code:429,error_message:'insufficient_quota'}).label,'额度不足')
+ assert.equal(errorGuide({id:1,status_code:499}).label,'客户端取消')
+ assert.equal(errorGuide({id:1,status_code:503,error_message:'dial tcp: connection refused'}).label,'连接失败')
+ assert.equal(errorGuide({id:1,status_code:403}).help.includes('不能仅凭状态码'),true)
+ assert.equal(errorGuide({id:1,status_code:200}).label,'执行成功')
+})
+test('availability reports independent account/model/capacity restrictions without promising recovery',async()=>{
+ const {accountAvailability}=await import('../src/core/accountView.ts')
+ const now=Date.parse('2026-10-15T00:00:00Z')
+ const account={id:1,name:'test',enabled:false,locked:true,status:'quota_paused',active_requests:2,dynamic_concurrency_limit:2,cooldown_until:'2026-10-15T01:00:00Z',cooldown_reason:'rate_limited',model_cooldowns:[{model:'test-model',reason:'limit',reset_at:'2026-10-15T02:00:00Z'}]}
+ const items=accountAvailability(account,now)
+ assert.deepEqual(items.map(item=>item.scope),['account','account','account','account','capacity','model'])
+ assert.equal(items.find(item=>item.label==='账号冷却中').action.includes('不保证'),true)
+ assert.equal(accountAvailability({...account,enabled:true,locked:false,status:'normal',active_requests:0,cooldown_until:'2026-10-14T00:00:00Z'},now).length,1)
+ assert.equal(accountAvailability({...account,enabled:true,locked:false,status:'normal',active_requests:0,cooldown_until:'',model_cooldowns:[]},now)[0].label,'未发现账号级阻塞')
+ assert.equal(accountAvailability({...account,enabled:true,locked:false,status:'normal',active_requests:0,cooldown_until:'',model_cooldowns:[]},now)[0].action.includes('会话绑定'),true)
+})

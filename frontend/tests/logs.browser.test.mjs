@@ -16,6 +16,8 @@ try{
  const records=Array.from({length:45},(_,index)=>({id:index+1,request_id:`req-${String(index+1).padStart(3,'0')}`,upstream_request_id:`upstream-${index+1}`,account_id:index%2+1,account_name:index%2?'备用账号':'主账号',model:'gpt-5.1-codex',status_code:index%3===0?598:index%3===1?200:499,error_message:index%3===0?longError:'',upstream_error_kind:index%3===0?'rate_limit_exceeded':'',created_at:'2026-10-14T08:01:00Z',first_token_ms:index%3===1?null:1200,duration_ms:5200,input_tokens:2200,output_tokens:index%3===1?null:120,cached_tokens:900,stream:true,via_websocket:true,is_retry_attempt:index%3===0,attempt_index:index%3===0?2:1}))
  let failNext=false,chainFail=false
  const chainRecords=[{...records[0],attempt_index:1,status_code:429,upstream_request_id:'upstream-first'},{...records[0],id:100,attempt_index:2,status_code:503,upstream_request_id:'upstream-second'},{...records[0],id:101,account_id:2,account_name:'备用账号',attempt_index:3,status_code:200,is_retry_attempt:false,error_message:'',upstream_error_kind:'',upstream_request_id:'upstream-final'}]
+ chainRecords[2].execution_trace=JSON.stringify({started_at:'2026-10-14T08:00:00Z',elapsed_ms:12000,truncated:false,events:[
+ {sequence:1,kind:'request_received',at_ms:0},{sequence:2,kind:'selection_started',at_ms:10},{sequence:3,kind:'queue_finished',at_ms:110,duration_ms:100},{sequence:4,kind:'selection_finished',at_ms:120,duration_ms:110},{sequence:5,kind:'account_selected',at_ms:121,account_id:1},{sequence:6,kind:'upstream_started',at_ms:122,account_id:1},{sequence:7,kind:'http_connection_finished',at_ms:222,duration_ms:100},{sequence:8,kind:'request_sent',at_ms:223,account_id:1},{sequence:9,kind:'first_content',at_ms:1223,account_id:1},{sequence:10,kind:'retry_wait_finished',at_ms:1600,duration_ms:200},{sequence:11,kind:'attempt_finished',at_ms:12000,account_id:2}]})
  let chainData={request_id:'req-001',linked:true,log_mode:'full',total:3,truncated:false,records:chainRecords}
  await page.route('**/api/admin/**',async route=>{
   const url=new URL(route.request().url()),path=url.pathname.replace('/api/admin','')
@@ -25,6 +27,7 @@ try{
    if(chainFail){chainFail=false;return route.fulfill({status:503,contentType:'application/json',body:'{"error":"链路查询失败"}'})}
    return json(chainData)
   }
+  if(path==='/usage/requests')return json({logs:[{...chainRecords[2],id:1,request_id:'req-001',attempt_count:3,retry_count:2,account_count:2,record_count:3,elapsed_ms:12000}],total:1,log_mode:'full'})
   if(path==='/usage/logs'){
    const q=url.searchParams;queries.push(q)
    assert(q.has('start')&&q.has('end'));assert.equal(q.get('include_canceled'),'true');assert.equal(q.has('limit'),false)
@@ -43,6 +46,12 @@ try{
  })
  await page.addInitScript(()=>sessionStorage.setItem('codex-account-service:admin-key','test-admin'))
  await page.goto(`${origin}/admin/logs`)
+ await page.getByText('共 1 条匹配记录',{exact:true}).waitFor()
+ assert.equal(await page.getByRole('button',{name:'按请求合并',exact:true}).getAttribute('aria-pressed'),'true')
+ await page.getByText('3 次已记录尝试 · 2 次重试 · 2 个账号',{exact:true}).waitFor()
+ assert.equal(await page.locator('tbody tr').count(),1)
+ await page.screenshot({path:'/tmp/codex2api-merged-requests.png',fullPage:true})
+ await page.getByRole('button',{name:'逐次尝试',exact:true}).click()
  await page.getByText('共 45 条匹配记录',{exact:true}).waitFor()
  assert.equal(await page.locator('tbody tr').count(),20)
  assert.equal(await page.getByText('ERROR_END',{exact:false}).count(),0,'full error must stay unmounted until preview opens')
@@ -50,6 +59,9 @@ try{
  const chain=page.getByRole('dialog',{name:'请求链路',exact:true})
  await chain.getByText('第 3 次尝试',{exact:true}).waitFor()
  assert.equal(await chain.locator('.chain-node').count(),3)
+ await chain.getByRole('heading',{name:'事件与分段耗时',exact:true}).waitFor()
+ await chain.getByText('1000 ms',{exact:true}).waitFor()
+ await chain.getByText('查看全部 11 条事件',{exact:true}).click();await chain.getByText('收到请求',{exact:true}).waitFor()
  await chain.getByRole('button',{name:'查看错误详情 req-001',exact:true}).first().hover();await page.getByRole('dialog',{name:'错误详情',exact:true}).waitFor()
  await page.keyboard.press('Escape');await page.getByRole('dialog',{name:'错误详情',exact:true}).waitFor({state:'hidden'});assert.equal(await chain.isVisible(),true,'Esc on nested preview must keep chain open')
  assert.equal(await chain.locator('.chain-summary>div').nth(0).locator('strong').textContent(),'3')
@@ -76,7 +88,7 @@ try{
  const preview=page.getByRole('button',{name:'查看错误详情 req-001',exact:true})
  await preview.hover()
  const popover=page.getByRole('dialog',{name:'错误详情',exact:true})
- await popover.waitFor();assert((await popover.locator('pre').textContent()).includes('ERROR_END'))
+ await popover.waitFor();assert((await popover.locator('pre').textContent()).includes('ERROR_END'));await popover.getByText('上游限流',{exact:true}).waitFor()
  await page.mouse.move(20,20);await popover.waitFor({state:'hidden'});await preview.hover();await popover.waitFor()
  assert.equal(await page.evaluate(()=>window.injected),undefined,'error HTML must remain plain text')
  await popover.getByRole('button',{name:'复制错误',exact:true}).click();await popover.getByText('已复制错误',{exact:true}).waitFor()

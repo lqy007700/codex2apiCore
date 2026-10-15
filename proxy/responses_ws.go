@@ -1238,6 +1238,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		}
 		outputCollector.Add(data)
 		parsed := gjson.ParseBytes(data)
+		recordFirstExecutionContent(c.Request.Context(), account.ID(), parsed)
 		eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 		eventType, data, parsed = rewriteEmptyIncompleteTerminal(emptyIncomplete, eventType, data, parsed)
 		clientData := data
