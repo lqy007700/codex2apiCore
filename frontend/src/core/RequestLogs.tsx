@@ -4,6 +4,7 @@ import {formatTime, request} from './client'
 import {ErrorPreview, LogDetails} from './LogEntry'
 import {errorGuide} from './errorGuide'
 import {RequestChain} from './RequestChain'
+import {PageHeader} from './PageHeader'
 import {defaultLogFilters, logQuery, logStatus, logTimeRange, logValue, type LogFilters, type UsageLog} from './logView'
 
 type LogPage = {logs:UsageLog[];total:number;log_mode?:string}
@@ -28,7 +29,7 @@ export function RequestLogs() {
  const input=(key:keyof LogFilters,label:string,placeholder='',numeric=false)=><label className="field">{label}<input aria-label={label} value={draft[key]} onChange={event=>field(key,event.target.value)} placeholder={placeholder} type={numeric?'number':'text'} min={numeric?1:undefined} step={numeric?1:undefined}/></label>
  const select=(key:keyof LogFilters,label:string,options:[string,string][])=><label className="field">{label}<select aria-label={label} value={draft[key]} onChange={event=>field(key,event.target.value)}>{options.map(([value,name])=><option key={value} value={value}>{name}</option>)}</select></label>
  const logs=data?.logs??[],total=data?.total??0,pages=Math.max(1,Math.ceil(total/query.pageSize))
- return <><header className="page-header"><div><p className="eyebrow">CODEX ACCOUNT SERVICE</p><h1>请求日志</h1><p>按时间与条件查找执行记录；悬停查看错误，点击固定，详情保留完整诊断信息。</p></div><div className="actions"><button disabled={loading} onClick={refresh}><RefreshCw size={16}/>刷新</button></div></header>
+ return <><PageHeader title="请求日志" description="查找请求、追踪执行链路，快速定位异常。"><button disabled={loading} onClick={refresh}><RefreshCw size={16}/>刷新</button></PageHeader>
  <div className="log-view-switch" role="group" aria-label="日志视图"><button aria-pressed={view==='requests'} onClick={()=>{setView('requests');setQuery(previous=>({...previous,page:1}))}}>按请求合并</button><button aria-pressed={view==='attempts'} onClick={()=>{setView('attempts');setQuery(previous=>({...previous,page:1}))}}>逐次尝试</button></div>
  <form className="card log-filters" onSubmit={event=>{event.preventDefault();apply()}}>
  <div className="log-filter-grid"><label className="field log-search">搜索日志<input value={draft.q} onChange={event=>field('q',event.target.value)} placeholder="请求 ID、模型、账号名、错误关键词…"/></label>
